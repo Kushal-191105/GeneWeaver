@@ -37,3 +37,15 @@ print("Minimum length:", data["length"].min())
 print("Maximum length:", data["length"].max())
 print("Average length:", round(data["length"].mean(), 2))
 print("Total bases:", data["length"].sum())
+
+# Genome statistics
+print("\n========== Genome Statistics ==========")
+
+print("Total sequences:", len(data))
+print("Total bases:", data["length"].sum())
+print("Average sequence length:", round(data["length"].mean(), 2))
+print("Shortest sequence:", data["length"].min())
+print("Longest sequence:", data["length"].max())
+
+print("\nClass distribution:")
+print(data["class"].value_counts().sort_index())

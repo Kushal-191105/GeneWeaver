@@ -1,5 +1,6 @@
 import pandas as pd
 from src.parser import read_fasta, create_chunks
+from src.parser import read_target
 
 INPUT_FILE = "data/human_sequences.txt"
 
@@ -97,3 +98,10 @@ if genome == reconstructed_genome:
     print("Chunk validation: PASSED")
 else:
     print("Chunk validation: FAILED")
+
+# Read CRISPR target
+target = read_target("data/target.txt")
+
+print("\n========== Target Sequence ==========")
+print("Target:", target)
+print("Target length:", len(target))

@@ -2,6 +2,8 @@ import pandas as pd
 from Bio import SeqIO
 
 
+
+
 def create_fasta_from_dataset(input_file, output_file):
     data = pd.read_csv(input_file, sep="\t")
 
@@ -38,3 +40,9 @@ def create_chunks(sequence, chunk_size=1000):
         chunks.append(chunk)
 
     return chunks
+
+def read_target(filename):
+    with open(filename, "r", encoding="utf-8") as file:
+        target = file.read().strip().upper()
+
+    return target

@@ -1,7 +1,8 @@
 import pandas as pd
 from src.parser import read_fasta, create_chunks
 from src.parser import read_target
-from src.cpu_alignment import find_exact_matches
+
+from src.cpu_alignment import find_matches_with_mismatches
 
 INPUT_FILE = "data/human_sequences.txt"
 
@@ -108,10 +109,24 @@ print("Target:", target)
 print("Target length:", len(target))
 
 # CPU exact alignment
-matches = find_exact_matches(genome, target)
+'''matches = find_exact_matches(genome, target)
 
 print("\n========== CPU Exact Matching ==========")
 print("Target:", target)
+print("Matches found:", len(matches))
+
+for match in matches[:10]:
+    print(match)'''
+
+matches = find_matches_with_mismatches(
+    genome,
+    target,
+    max_mismatches=2
+)
+
+print("\n========== CPU Alignment ==========")
+print("Target:", target)
+print("Maximum mismatches allowed:", 2)
 print("Matches found:", len(matches))
 
 for match in matches[:10]:

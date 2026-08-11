@@ -1,4 +1,14 @@
-def find_exact_matches(genome, target):
+def calculate_mismatches(sequence, target):
+    mismatches = 0
+
+    for i in range(len(target)):
+        if sequence[i] != target[i]:
+            mismatches += 1
+
+    return mismatches
+
+
+def find_matches_with_mismatches(genome, target, max_mismatches=2):
     matches = []
 
     genome_length = len(genome)
@@ -10,10 +20,16 @@ def find_exact_matches(genome, target):
             position:position + target_length
         ]
 
-        if current_sequence == target:
+        mismatches = calculate_mismatches(
+            current_sequence,
+            target
+        )
+
+        if mismatches <= max_mismatches:
             matches.append({
                 "position": position,
-                "sequence": current_sequence
+                "sequence": current_sequence,
+                "mismatches": mismatches
             })
 
     return matches

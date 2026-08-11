@@ -1,13 +1,30 @@
-from src.parser import read_fasta
+import pandas as pd
 
-FASTA_FILE = "data/genome.fasta"
+INPUT_FILE = "data/human_sequences.txt"
 
-sequences = read_fasta(FASTA_FILE)
+data = pd.read_csv(INPUT_FILE, sep="\t")
 
-print("Number of sequences:", len(sequences))
+valid_bases = set("ATGC")
+ambiguous_bases = set("N")
 
-print("\nFirst sequence:")
-print(sequences[0])
 
-print("\nFirst sequence length:")
-print(len(sequences[0]))
+def classify_sequence(sequence):
+    sequence = str(sequence).upper().strip()
+
+    characters = set(sequence)
+
+    if characters.issubset(valid_bases):
+        return "valid"
+
+    if characters.issubset(valid_bases | ambiguous_bases):
+        return "ambiguous"
+
+    return "invalid"
+
+
+data["status"] = data["sequence"].apply(classify_sequence)
+
+print("Total sequences:", len(data))
+print("Valid sequences:", (data["status"] == "valid").sum())
+print("Ambiguous sequences:", (data["status"] == "ambiguous").sum())
+print("Invalid sequences:", (data["status"] == "invalid").sum())

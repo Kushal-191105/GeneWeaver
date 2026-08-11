@@ -1,4 +1,5 @@
 import pandas as pd
+from src.parser import read_fasta, create_chunks
 
 INPUT_FILE = "data/human_sequences.txt"
 
@@ -49,3 +50,22 @@ print("Longest sequence:", data["length"].max())
 
 print("\nClass distribution:")
 print(data["class"].value_counts().sort_index())
+
+# Genome chunking
+sequences = read_fasta("data/genome.fasta")
+
+genome = "".join(sequences)
+
+chunk_size = 1000
+
+chunks = create_chunks(genome, chunk_size)
+
+print("\n========== Genome Chunking ==========")
+print("Total genome length:", len(genome))
+print("Chunk size:", chunk_size)
+print("Number of chunks:", len(chunks))
+
+print("\nFirst chunk:")
+print(chunks[0])
+
+print("\nFirst chunk length:", len(chunks[0]))

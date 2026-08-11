@@ -32,7 +32,9 @@ def read_fasta(filename):
 def create_chunks(sequence, chunk_size=1000):
     chunks = []
 
-    for i in range(0, len(sequence), chunk_size):
-        chunks.append(sequence[i:i + chunk_size])
+    for start in range(0, len(sequence), chunk_size):
+        end = start + chunk_size
+        chunk = sequence[start:end]
+        chunks.append(chunk)
 
     return chunks

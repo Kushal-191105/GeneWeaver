@@ -69,3 +69,31 @@ print("\nFirst chunk:")
 print(chunks[0])
 
 print("\nFirst chunk length:", len(chunks[0]))
+
+# Chunk validation
+print("\n========== Chunk Validation ==========")
+
+valid_chunks = 0
+invalid_chunks = 0
+
+valid_bases = set("ATGCN")
+
+for chunk in chunks:
+    if set(chunk.upper()).issubset(valid_bases):
+        valid_chunks += 1
+    else:
+        invalid_chunks += 1
+
+print("Valid chunks:", valid_chunks)
+print("Invalid chunks:", invalid_chunks)
+
+# Check that no DNA was lost during chunking
+reconstructed_genome = "".join(chunks)
+
+print("Original genome length:", len(genome))
+print("Reconstructed length:", len(reconstructed_genome))
+
+if genome == reconstructed_genome:
+    print("Chunk validation: PASSED")
+else:
+    print("Chunk validation: FAILED")

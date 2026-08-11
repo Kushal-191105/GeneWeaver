@@ -1,11 +1,13 @@
-def calculate_mismatches(sequence, target):
+def compare_sequences(sequence, target):
     mismatches = 0
+    mismatch_positions = []
 
     for i in range(len(target)):
         if sequence[i] != target[i]:
             mismatches += 1
+            mismatch_positions.append(i)
 
-    return mismatches
+    return mismatches, mismatch_positions
 
 
 def find_matches_with_mismatches(genome, target, max_mismatches=2):
@@ -20,7 +22,7 @@ def find_matches_with_mismatches(genome, target, max_mismatches=2):
             position:position + target_length
         ]
 
-        mismatches = calculate_mismatches(
+        mismatches, mismatch_positions = compare_sequences(
             current_sequence,
             target
         )
@@ -29,7 +31,8 @@ def find_matches_with_mismatches(genome, target, max_mismatches=2):
             matches.append({
                 "position": position,
                 "sequence": current_sequence,
-                "mismatches": mismatches
+                "mismatches": mismatches,
+                "mismatch_positions": mismatch_positions
             })
 
     return matches

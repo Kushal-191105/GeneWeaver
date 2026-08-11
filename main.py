@@ -1,6 +1,7 @@
 import pandas as pd
 from src.parser import read_fasta, create_chunks
 from src.parser import read_target
+import time
 
 from src.cpu_alignment import find_matches_with_mismatches
 
@@ -118,11 +119,19 @@ print("Matches found:", len(matches))
 for match in matches[:10]:
     print(match)'''
 
+# Start CPU timer
+start_time = time.perf_counter()
+
 matches = find_matches_with_mismatches(
     genome,
     target,
     max_mismatches=2
 )
+
+# Stop CPU timer
+end_time = time.perf_counter()
+
+execution_time = end_time - start_time
 
 print("\n========== CPU Alignment ==========")
 print("Target:", target)
@@ -131,3 +140,9 @@ print("Matches found:", len(matches))
 
 for match in matches[:10]:
     print(match)
+
+print("\n========== CPU Benchmark ==========")
+print("Genome length:", len(genome))
+print("Target length:", len(target))
+print("Matches found:", len(matches))
+print("CPU execution time:", round(execution_time, 6), "seconds")

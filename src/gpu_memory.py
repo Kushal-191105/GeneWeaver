@@ -7,7 +7,10 @@ BASE_TO_INT = {
     "C": 1,
     "G": 2,
     "T": 3,
+    "N": 4,
 }
+
+UNKNOWN_BASE = 5
 
 
 def encode_sequence(sequence: str) -> np.ndarray:
@@ -21,7 +24,10 @@ def encode_sequence(sequence: str) -> np.ndarray:
     """
 
     return np.array(
-        [BASE_TO_INT[base] for base in sequence.upper()],
+        [
+            BASE_TO_INT.get(base, UNKNOWN_BASE)
+            for base in sequence.upper()
+        ],
         dtype=np.int8,
     )
 

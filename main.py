@@ -1,148 +1,177 @@
+import argparse
+import os
+
 import pandas as pd
-from src.parser import read_fasta, create_chunks
-from src.parser import read_target
-import time
 
-from src.cpu_alignment import find_matches_with_mismatches
+from src.parser import load_sequence_dataset, read_targets
+from src.pipeline import run_alignment
 
-INPUT_FILE = "data/human_sequences.txt"
-
-data = pd.read_csv(INPUT_FILE, sep="\t")
-
-valid_bases = set("ATGC")
-ambiguous_bases = set("N")
+DEFAULT_INPUT = "data/human_sequences.csv"
+DEFAULT_TARGET = "data/target.txt"
+DEFAULT_OUTPUT = "results/matches.csv"
+DEFAULT_LIMIT = 200
+LINE = "=" * 50
 
 
-def classify_sequence(sequence):
-    sequence = str(sequence).upper().strip()
-    characters = set(sequence)
+def parse_args():
+    parser = argparse.ArgumentParser(description="GeneWeaver alignment")
 
-    if characters.issubset(valid_bases):
-        return "valid"
+    parser.add_argument(
+        "--mode",
+        choices=["cpu", "gpu"],
+        default="cpu",
+        help="Alignment backend to use (default: cpu)",
+    )
+    parser.add_argument(
+        "--input",
+        default=DEFAULT_INPUT,
+        help=f"Human DNA dataset, CSV or TSV (default: {DEFAULT_INPUT})",
+    )
+    parser.add_argument(
+        "--target",
+        default=DEFAULT_TARGET,
+        help=f"Target file, one target per line (default: {DEFAULT_TARGET})",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        help=(
+            "Use only the first N sequences of the dataset "
+            f"(default: {DEFAULT_LIMIT}, use 0 for the whole dataset)"
+        ),
+    )
+    parser.add_argument(
+        "--max-mismatches",
+        type=int,
+        default=2,
+        help="Maximum mismatches allowed per match (default: 2)",
+    )
+    parser.add_argument(
+        "--output",
+        default=DEFAULT_OUTPUT,
+        help=f"CSV file for the matches (default: {DEFAULT_OUTPUT})",
+    )
+    parser.add_argument(
+        "--no-export",
+        action="store_true",
+        help="Do not write the matches CSV",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print dataset statistics before aligning",
+    )
 
-    if characters.issubset(valid_bases | ambiguous_bases):
-        return "ambiguous"
-
-    return "invalid"
+    return parser.parse_args()
 
 
-data["status"] = data["sequence"].apply(classify_sequence)
+def print_dataset_stats(dataset):
+    print("\nDataset Statistics")
+    print("-" * 50)
+    print("Sequences:", len(dataset))
+    print("Total bases:", int(dataset["length"].sum()))
+    print("Shortest sequence:", int(dataset["length"].min()))
+    print("Longest sequence:", int(dataset["length"].max()))
+    print("Average length:", round(float(dataset["length"].mean()), 2))
 
-print("Total sequences:", len(data))
-print("Valid sequences:", (data["status"] == "valid").sum())
-print("Ambiguous sequences:", (data["status"] == "ambiguous").sum())
-print("Invalid sequences:", (data["status"] == "invalid").sum())
+    if "class" in dataset.columns:
+        print("\nClass distribution:")
+        print(dataset["class"].value_counts().sort_index().to_string())
 
 
-# Sequence length analysis
-data["length"] = data["sequence"].astype(str).str.len()
+def export_matches(matches, output_file):
+    directory = os.path.dirname(output_file)
 
-print("\nSequence Length Statistics:")
-print("Minimum length:", data["length"].min())
-print("Maximum length:", data["length"].max())
-print("Average length:", round(data["length"].mean(), 2))
-print("Total bases:", data["length"].sum())
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
-# Genome statistics
-print("\n========== Genome Statistics ==========")
+    results = pd.DataFrame(matches, columns=[
+        "sequence_id",
+        "target",
+        "position",
+        "sequence",
+        "mismatches",
+    ])
 
-print("Total sequences:", len(data))
-print("Total bases:", data["length"].sum())
-print("Average sequence length:", round(data["length"].mean(), 2))
-print("Shortest sequence:", data["length"].min())
-print("Longest sequence:", data["length"].max())
+    results.to_csv(output_file, index=False)
 
-print("\nClass distribution:")
-print(data["class"].value_counts().sort_index())
+    return len(results)
 
-# Genome chunking
-sequences = read_fasta("data/genome.fasta")
 
-genome = "".join(sequences)
+def main():
+    args = parse_args()
 
-chunk_size = 1000
+    limit = args.limit if args.limit and args.limit > 0 else None
 
-chunks = create_chunks(genome, chunk_size)
+    dataset = load_sequence_dataset(args.input, limit=limit)
+    targets = read_targets(args.target)
 
-print("\n========== Genome Chunking ==========")
-print("Total genome length:", len(genome))
-print("Chunk size:", chunk_size)
-print("Number of chunks:", len(chunks))
+    if dataset.empty:
+        raise SystemExit("No sequences found in " + args.input)
 
-print("\nFirst chunk:")
-print(chunks[0])
+    if not targets:
+        raise SystemExit("No targets found in " + args.target)
 
-print("\nFirst chunk length:", len(chunks[0]))
+    label = "CPU" if args.mode == "cpu" else "GPU"
 
-# Chunk validation
-print("\n========== Chunk Validation ==========")
+    print(f"GeneWeaver - {label} Alignment")
+    print(LINE)
+    print("Dataset:", args.input)
+    print("Sequences:", len(dataset))
+    print("Total bases:", int(dataset["length"].sum()))
+    print("Targets:", len(targets))
 
-valid_chunks = 0
-invalid_chunks = 0
+    if limit is not None:
+        print(f"(limited to the first {limit} sequences, use --limit 0 for all)")
 
-valid_bases = set("ATGCN")
+    if args.stats:
+        print_dataset_stats(dataset)
 
-for chunk in chunks:
-    if set(chunk.upper()).issubset(valid_bases):
-        valid_chunks += 1
-    else:
-        invalid_chunks += 1
+    all_matches = []
+    summary_rows = []
+    total_time = 0.0
 
-print("Valid chunks:", valid_chunks)
-print("Invalid chunks:", invalid_chunks)
+    for target in targets:
+        result = run_alignment(
+            dataset,
+            target,
+            mode=args.mode,
+            max_mismatches=args.max_mismatches,
+        )
 
-# Check that no DNA was lost during chunking
-reconstructed_genome = "".join(chunks)
+        all_matches.extend(result["matches"])
+        total_time += result["elapsed"]
 
-print("Original genome length:", len(genome))
-print("Reconstructed length:", len(reconstructed_genome))
+        summary_rows.append({
+            "target": result["target"],
+            "target_length": result["target_length"],
+            "positions": result["positions"],
+            "matches": len(result["matches"]),
+            "seconds": round(result["elapsed"], 6),
+        })
 
-if genome == reconstructed_genome:
-    print("Chunk validation: PASSED")
-else:
-    print("Chunk validation: FAILED")
+        print()
+        print("Target:", result["target"])
+        print("Target length:", result["target_length"])
+        print("Alignment positions:", result["positions"])
+        print("Matches found:", len(result["matches"]))
+        print(f"{label} time:", f"{result['elapsed']:.6f}", "seconds")
 
-# Read CRISPR target
-target = read_target("data/target.txt")
+        if args.mode == "gpu":
+            print("Backend:", result["backend"])
 
-print("\n========== Target Sequence ==========")
-print("Target:", target)
-print("Target length:", len(target))
+    if len(targets) > 1:
+        print("\nSummary")
+        print("-" * 50)
+        print(pd.DataFrame(summary_rows).to_string(index=False))
+        print(f"\nTotal {label} time:", f"{total_time:.6f}", "seconds")
+        print("Total matches:", len(all_matches))
 
-# CPU exact alignment
-'''matches = find_exact_matches(genome, target)
+    if not args.no_export:
+        rows = export_matches(all_matches, args.output)
+        print(f"\nMatches exported to: {args.output} ({rows} rows)")
 
-print("\n========== CPU Exact Matching ==========")
-print("Target:", target)
-print("Matches found:", len(matches))
 
-for match in matches[:10]:
-    print(match)'''
-
-# Start CPU timer
-start_time = time.perf_counter()
-
-matches = find_matches_with_mismatches(
-    genome,
-    target,
-    max_mismatches=2
-)
-
-# Stop CPU timer
-end_time = time.perf_counter()
-
-execution_time = end_time - start_time
-
-print("\n========== CPU Alignment ==========")
-print("Target:", target)
-print("Maximum mismatches allowed:", 2)
-print("Matches found:", len(matches))
-
-for match in matches[:10]:
-    print(match)
-
-print("\n========== CPU Benchmark ==========")
-print("Genome length:", len(genome))
-print("Target length:", len(target))
-print("Matches found:", len(matches))
-print("CPU execution time:", round(execution_time, 6), "seconds")
+if __name__ == "__main__":
+    main()

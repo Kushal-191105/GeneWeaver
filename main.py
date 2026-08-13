@@ -7,7 +7,7 @@ from src.parser import load_sequence_dataset, read_targets
 from src.pipeline import run_alignment
 
 DEFAULT_INPUT = "data/human_sequences.csv"
-DEFAULT_TARGET = "data/target.txt"
+DEFAULT_TARGET = "data/targets.csv"
 DEFAULT_OUTPUT = "results/matches.csv"
 DEFAULT_LIMIT = 200
 LINE = "=" * 50

@@ -3,11 +3,25 @@ GeneWeaver is a GPU-accelerated CRISPR DNA sequence alignment tool designed to i
 
 ## Input data
 
-Alignment runs against the **human DNA sequence dataset** `data/human_sequences.csv` (4380 sequences, ~5.5 M bases) — the only sequence input the pipeline uses.
+The pipeline reads two interchangeable sequence formats and the format is detected automatically from the file, so the same commands work either way.
 
-Columns: `sequence_id`, `sequence`, `class`. Only `sequence` is required — ids are generated if missing, and CSV or TSV both work (separator auto-detected).
+**Primary dataset — FASTA:** `data/genome.fasta` (4380 sequences, ~5.5 M bases). This is the default input. Sequence ids come from the FASTA headers (`>sequence_0`), multi-line records and lowercase bases are handled, and BioPython's `SeqIO` is used when installed with a built-in reader as fallback.
 
-Targets live in `data/target.txt`, one target per line; `#` lines are ignored.
+**Alternative dataset — CSV/TSV:** `data/human_sequences.csv`, the same 4380 sequences with columns `sequence_id`, `sequence`, `class`. Only `sequence` is required — ids are generated if missing, and the separator is auto-detected. The `class` column is what `--stats` uses for the class distribution, so that section only appears for CSV/TSV runs; FASTA carries no labels.
+
+```bash
+python main.py                                     # FASTA (default)
+python main.py --input data/human_sequences.csv    # CSV
+python main.py --input data/genome.fasta --format fasta   # skip detection
+```
+
+Regenerate the FASTA from the CSV at any time:
+
+```bash
+python -m src.parser --input data/human_sequences.csv --output data/genome.fasta
+```
+
+Targets live in `data/targets.csv`, one target per row under a `target` column; blank values and `#` lines are ignored.
 
 Runs are limited to the first 200 sequences by default so they finish quickly; `--limit 0` uses all 4380.
 
@@ -30,7 +44,8 @@ Output:
 ```
 GeneWeaver - CPU Alignment
 ==================================================
-Dataset: data/human_sequences.csv
+Dataset: data/genome.fasta
+Format: FASTA
 Sequences: 200
 Total bases: 264902
 Targets: 5
@@ -54,7 +69,8 @@ python benchmark.py
 ```
 GeneWeaver Performance Benchmark
 ==================================================
-Dataset: data/human_sequences.csv
+Dataset: data/genome.fasta
+Format: FASTA
 Sequences: 200
 Targets: 5
 
@@ -76,9 +92,10 @@ Result check: PASSED (CPU and GPU agree)
 
 ### Useful options
 
-Both scripts accept `--input`, `--target`, `--limit` and `--max-mismatches`; `main.py` adds `--output`, `--no-export` and `--stats`.
+Both scripts accept `--input`, `--format`, `--target`, `--limit` and `--max-mismatches`; `main.py` adds `--output`, `--no-export` and `--stats`.
 
 ```bash
-python main.py --mode gpu --limit 0 --max-mismatches 3   # whole human dataset
+python main.py --mode gpu --limit 0 --max-mismatches 3   # whole genome.fasta
+python main.py --input data/human_sequences.csv --stats  # CSV run with class stats
 python benchmark.py --limit 500
 ```

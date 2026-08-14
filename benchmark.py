@@ -1,15 +1,9 @@
-"""GeneWeaver performance benchmark: CPU backend vs GPU backend.
-
-    python benchmark.py
-    python benchmark.py --input data/sequences.csv --limit 200
-"""
-
 import argparse
 
-from src.parser import load_sequence_dataset, read_targets
+from src.parser import format_label, load_sequence_dataset, read_targets
 from src.pipeline import run_alignment
 
-DEFAULT_INPUT = "data/human_sequences.csv"
+DEFAULT_INPUT = "data/genome.fasta"
 DEFAULT_TARGET = "data/targets.csv"
 DEFAULT_LIMIT = 200
 LINE = "=" * 50
@@ -18,7 +12,17 @@ LINE = "=" * 50
 def parse_args():
     parser = argparse.ArgumentParser(description="GeneWeaver benchmark")
 
-    parser.add_argument("--input", default=DEFAULT_INPUT)
+    parser.add_argument(
+        "--input",
+        default=DEFAULT_INPUT,
+        help=f"FASTA (primary) or CSV/TSV dataset (default: {DEFAULT_INPUT})",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["auto", "fasta", "csv"],
+        default="auto",
+        help="Force the input format instead of detecting it (default: auto)",
+    )
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument(
         "--limit",
@@ -72,7 +76,13 @@ def main():
 
     limit = args.limit if args.limit and args.limit > 0 else None
 
-    dataset = load_sequence_dataset(args.input, limit=limit)
+    file_format = None if args.format == "auto" else args.format
+
+    dataset = load_sequence_dataset(
+        args.input,
+        limit=limit,
+        file_format=file_format,
+    )
     targets = read_targets(args.target)
 
     if dataset.empty:
@@ -84,6 +94,7 @@ def main():
     print("GeneWeaver Performance Benchmark")
     print(LINE)
     print("Dataset:", args.input)
+    print("Format:", format_label(dataset.attrs.get("format")))
     print("Sequences:", len(dataset))
     print("Total bases:", int(dataset["length"].sum()))
     print("Targets:", len(targets))

@@ -1,14 +1,156 @@
-import os
-
 import pandas as pd
-from Bio import SeqIO
-
 
 VALID_BASES = set("ATGCN")
 
+FASTA_EXTENSIONS = (
+    ".fasta",
+    ".fa",
+    ".fas",
+    ".fna",
+    ".ffn",
+    ".faa",
+    ".frn",
+)
 
-def load_sequence_dataset(filename, limit=None, valid_only=False):
-    """Load a sequence dataset from a CSV/TSV file.
+DATASET_COLUMNS = ["sequence_id", "sequence", "length"]
+
+FORMAT_LABELS = {"fasta": "FASTA", "table": "CSV/TSV"}
+
+
+def format_label(file_format):
+    """Human-readable name for a detected format."""
+    return FORMAT_LABELS.get(file_format, str(file_format).upper())
+
+
+def detect_format(filename):
+    """Return "fasta" or "table" for a dataset file.
+
+    The extension decides first; if it is unknown the first non-blank line
+    is inspected, and a leading '>' means FASTA.
+    """
+    extension = os.path.splitext(filename)[1].lower()
+
+    if extension in FASTA_EXTENSIONS:
+        return "fasta"
+
+    if extension in (".csv", ".tsv"):
+        return "table"
+
+    try:
+        with open(filename, "r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                line = line.strip()
+
+                if line:
+                    return "fasta" if line.startswith(">") else "table"
+    except OSError:
+        pass
+
+    return "table"
+
+
+def _iter_fasta_builtin(filename):
+    """Minimal FASTA reader used when BioPython is unavailable."""
+    with open(filename, "r", encoding="utf-8") as handle:
+        record_id = None
+        chunks = []
+
+        for line in handle:
+            line = line.strip()
+
+            if not line or line.startswith((";", "#")):
+                continue
+
+            if line.startswith(">"):
+                if record_id is not None:
+                    yield record_id, "".join(chunks)
+
+                header = line[1:].strip()
+                record_id = header.split()[0] if header else ""
+                chunks = []
+            elif record_id is not None:
+                chunks.append(line)
+
+        if record_id is not None:
+            yield record_id, "".join(chunks)
+
+
+def iter_fasta_records(filename):
+    """Yield (record_id, sequence) pairs from a FASTA file.
+
+    Uses BioPython's SeqIO when it is installed and falls back to the
+    built-in reader otherwise, so the pipeline still runs without it.
+    """
+    if not os.path.exists(filename):
+        raise FileNotFoundError("FASTA file not found: " + filename)
+
+    try:
+        from Bio import SeqIO
+    except ImportError:
+        yield from _iter_fasta_builtin(filename)
+        return
+
+    for record in SeqIO.parse(filename, "fasta"):
+        yield record.id, str(record.seq)
+
+
+def _finalise(dataset, valid_only=False, limit=None):
+    """Drop empties, optionally keep valid bases only, add the length column."""
+    dataset = dataset[dataset["sequence"].str.len() > 0]
+
+    if valid_only:
+        keep = dataset["sequence"].apply(
+            lambda sequence: set(sequence).issubset(VALID_BASES)
+        )
+        dataset = dataset[keep]
+
+    dataset = dataset.copy()
+    dataset["length"] = dataset["sequence"].str.len()
+
+    dataset = dataset.reset_index(drop=True)
+
+    if limit is not None:
+        dataset = dataset.head(limit)
+
+    return dataset
+
+
+def load_fasta_dataset(filename, limit=None, valid_only=False):
+    """Load sequences from a FASTA file.
+
+    Record ids come from the FASTA headers (the part before the first
+    space); ids are generated when a header is empty. FASTA carries no
+    class labels, so the returned frame has no 'class' column.
+
+    Returns a DataFrame with columns: sequence_id, sequence, length.
+    """
+    rows = []
+
+    for index, (record_id, sequence) in enumerate(iter_fasta_records(filename)):
+        sequence = sequence.strip().upper()
+
+        if not sequence:
+            continue
+
+        if valid_only and not set(sequence).issubset(VALID_BASES):
+            continue
+
+        rows.append({
+            "sequence_id": record_id or f"sequence_{index}",
+            "sequence": sequence,
+        })
+
+        if limit is not None and len(rows) >= limit:
+            break
+
+    if not rows:
+        return pd.DataFrame(columns=DATASET_COLUMNS)
+
+    return _finalise(pd.DataFrame(rows), valid_only=False, limit=limit)
+
+
+def load_table_dataset(filename, limit=None, valid_only=False):
+    """Load sequences from a CSV/TSV file.
 
     The separator is auto-detected, so .csv and tab-separated .txt files
     both work. The sequence column may be named 'sequence' or 'seq';
@@ -17,9 +159,6 @@ def load_sequence_dataset(filename, limit=None, valid_only=False):
     Returns a DataFrame with columns: sequence_id, sequence, length
     (plus 'class' when the file provides it).
     """
-    if not os.path.exists(filename):
-        raise FileNotFoundError("Dataset not found: " + filename)
-
     data = pd.read_csv(filename, sep=None, engine="python")
 
     columns = {column.lower(): column for column in data.columns}
@@ -49,51 +188,82 @@ def load_sequence_dataset(filename, limit=None, valid_only=False):
     if "class" in columns:
         dataset["class"] = data[columns["class"]]
 
-    dataset = dataset[dataset["sequence"].str.len() > 0]
+    return _finalise(dataset, valid_only=valid_only, limit=limit)
 
-    if valid_only:
-        keep = dataset["sequence"].apply(
-            lambda sequence: set(sequence).issubset(VALID_BASES)
+
+def load_sequence_dataset(filename, limit=None, valid_only=False,
+                          file_format=None):
+    """Load a sequence dataset from FASTA (primary) or CSV/TSV.
+
+    The format is detected from the file unless `file_format` is given
+    ("fasta" or "table"/"csv").
+
+    Returns a DataFrame with columns: sequence_id, sequence, length
+    (plus 'class' for CSV/TSV files that provide it). The format that was
+    used is recorded in `dataset.attrs["format"]`.
+    """
+    if not os.path.exists(filename):
+        raise FileNotFoundError("Dataset not found: " + filename)
+
+    file_format = (file_format or detect_format(filename)).lower()
+
+    if file_format in ("csv", "tsv", "table"):
+        file_format = "table"
+    elif file_format in ("fasta", "fa"):
+        file_format = "fasta"
+    else:
+        raise ValueError("Unknown dataset format: " + file_format)
+
+    if file_format == "fasta":
+        dataset = load_fasta_dataset(
+            filename,
+            limit=limit,
+            valid_only=valid_only,
         )
-        dataset = dataset[keep]
+    else:
+        dataset = load_table_dataset(
+            filename,
+            limit=limit,
+            valid_only=valid_only,
+        )
 
-    dataset["length"] = dataset["sequence"].str.len()
-
-    dataset = dataset.reset_index(drop=True)
-
-    if limit is not None:
-        dataset = dataset.head(limit)
+    dataset.attrs["format"] = file_format
+    dataset.attrs["source"] = filename
 
     return dataset
 
 
+def create_fasta_from_dataset(input_file, output_file, limit=None):
+    """Write a FASTA file from a CSV/TSV sequence dataset.
 
-
-def create_fasta_from_dataset(input_file, output_file):
-    data = pd.read_csv(input_file, sep="\t")
+    Existing sequence ids are reused as FASTA headers so the generated
+    file lines up with the table it came from.
+    """
+    dataset = load_sequence_dataset(input_file, limit=limit)
 
     print("Creating FASTA file...")
-    print("Sequences found:", len(data))
+    print("Sequences found:", len(dataset))
+
+    directory = os.path.dirname(output_file)
+
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    records = dataset[["sequence_id", "sequence"]].itertuples(index=False)
 
     with open(output_file, "w", encoding="utf-8") as fasta_file:
-        for index, sequence in enumerate(data["sequence"]):
+        for sequence_id, sequence in records:
+            fasta_file.write(f">{sequence_id}\n")
+            fasta_file.write(sequence + "\n")
 
-            sequence = str(sequence).strip().upper()
+    print("FASTA file created:", output_file)
 
-            if sequence:
-                fasta_file.write(f">sequence_{index}\n")
-                fasta_file.write(sequence + "\n")
-
-    print("FASTA file created successfully.")
+    return len(dataset)
 
 
 def read_fasta(filename):
-    sequences = []
-
-    for record in SeqIO.parse(filename, "fasta"):
-        sequences.append(str(record.seq))
-
-    return sequences
+    """Return just the sequences of a FASTA file, in file order."""
+    return [sequence for _, sequence in iter_fasta_records(filename)]
 
 
 def create_chunks(sequence, chunk_size=1000):
@@ -105,6 +275,7 @@ def create_chunks(sequence, chunk_size=1000):
         chunks.append(chunk)
 
     return chunks
+
 
 def read_targets(filename):
     """Read a target dataset from CSV.
@@ -136,3 +307,33 @@ def read_targets(filename):
         targets.append(target)
 
     return targets
+
+
+def main():
+    """CSV/TSV -> FASTA conversion helper.
+
+        python -m src.parser --input data/human_sequences.csv \
+            --output data/genome.fasta
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Convert a CSV/TSV sequence dataset to FASTA",
+    )
+    parser.add_argument("--input", default="data/human_sequences.csv")
+    parser.add_argument("--output", default="data/genome.fasta")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Convert only the first N sequences (0 = all)",
+    )
+
+    args = parser.parse_args()
+    limit = args.limit if args.limit and args.limit > 0 else None
+
+    create_fasta_from_dataset(args.input, args.output, limit=limit)
+
+
+if __name__ == "__main__":
+    main()

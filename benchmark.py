@@ -1,7 +1,8 @@
 import argparse
 
 from src.parser import format_label, load_sequence_dataset, read_targets
-from src.pipeline import run_alignment
+from src.chunking import DEFAULT_CHUNK_SIZE
+from src.pipeline import run_chunked_alignment
 
 DEFAULT_INPUT = "data/genome.fasta"
 DEFAULT_TARGET = "data/targets.csv"
@@ -31,24 +32,34 @@ def parse_args():
         help=f"First N sequences (default: {DEFAULT_LIMIT}, 0 = all)",
     )
     parser.add_argument("--max-mismatches", type=int, default=2)
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help=f"Bases per chunk (default: {DEFAULT_CHUNK_SIZE})",
+    )
 
     return parser.parse_args()
 
 
-def run_mode(dataset, targets, mode, max_mismatches):
+def run_mode(dataset, targets, mode, max_mismatches,
+             chunk_size=DEFAULT_CHUNK_SIZE):
     positions = 0
     matches = 0
     elapsed = 0.0
+    chunks = 0
     backend = mode
 
     for target in targets:
-        result = run_alignment(
+        result = run_chunked_alignment(
             dataset,
             target,
             mode=mode,
             max_mismatches=max_mismatches,
+            chunk_size=chunk_size,
         )
 
+        chunks += result["chunks"]
         positions += result["positions"]
         matches += len(result["matches"])
         elapsed += result["elapsed"]
@@ -58,6 +69,7 @@ def run_mode(dataset, targets, mode, max_mismatches):
         "positions": positions,
         "matches": matches,
         "elapsed": elapsed,
+        "chunks": chunks,
         "backend": backend,
     }
 
@@ -66,6 +78,7 @@ def report(title, result):
     print(f"\n{title}")
     print("-" * 50)
     print("Backend:", result["backend"])
+    print("Chunks processed:", result["chunks"])
     print("Alignment positions:", result["positions"])
     print("Matches found:", result["matches"])
     print("Execution time:", f"{result['elapsed']:.6f}", "seconds")
@@ -96,13 +109,16 @@ def main():
     print("Dataset:", args.input)
     print("Format:", format_label(dataset.attrs.get("format")))
     print("Sequences:", len(dataset))
+    print("Chunk size:", args.chunk_size, "bases")
     print("Total bases:", int(dataset["length"].sum()))
     print("Targets:", len(targets))
 
-    cpu_result = run_mode(dataset, targets, "cpu", args.max_mismatches)
+    cpu_result = run_mode(
+        dataset, targets, "cpu", args.max_mismatches, args.chunk_size)
     report("CPU", cpu_result)
 
-    gpu_result = run_mode(dataset, targets, "gpu", args.max_mismatches)
+    gpu_result = run_mode(
+        dataset, targets, "gpu", args.max_mismatches, args.chunk_size)
     report("GPU", gpu_result)
 
     print("\nPerformance")

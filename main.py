@@ -4,7 +4,8 @@ import os
 import pandas as pd
 
 from src.parser import format_label, load_sequence_dataset, read_targets
-from src.pipeline import run_alignment
+from src.chunking import DEFAULT_CHUNK_SIZE
+from src.pipeline import run_chunked_alignment
 
 DEFAULT_INPUT = "data/genome.fasta"
 FALLBACK_INPUT = "data/human_sequences.csv"
@@ -49,6 +50,15 @@ def parse_args():
         help=(
             "Use only the first N sequences of the dataset "
             f"(default: {DEFAULT_LIMIT}, use 0 for the whole dataset)"
+        ),
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help=(
+            "Bases per chunk sent to the alignment backend "
+            f"(default: {DEFAULT_CHUNK_SIZE})"
         ),
     )
     parser.add_argument(
@@ -173,11 +183,12 @@ def main():
     total_time = 0.0
 
     for target in targets:
-        result = run_alignment(
+        result = run_chunked_alignment(
             dataset,
             target,
             mode=args.mode,
             max_mismatches=args.max_mismatches,
+            chunk_size=args.chunk_size,
         )
 
         all_matches.extend(result["matches"])
@@ -187,6 +198,7 @@ def main():
             "target": result["target"],
             "target_length": result["target_length"],
             "positions": result["positions"],
+            "chunks": result["chunks"],
             "matches": len(result["matches"]),
             "seconds": round(result["elapsed"], 6),
         })
@@ -195,6 +207,7 @@ def main():
         print("Target:", result["target"])
         print("Target length:", result["target_length"])
         print("Alignment positions:", result["positions"])
+        print("Chunks:", result["chunks"], "x", result["chunk_size"], "bases")
         print("Matches found:", len(result["matches"]))
         print(f"{label} time:", f"{result['elapsed']:.6f}", "seconds")
 

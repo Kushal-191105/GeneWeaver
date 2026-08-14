@@ -119,3 +119,62 @@ def _build_results(sequence, target_length, num_windows, mismatches):
 
     return results
 
+
+def count_mismatches_numpy(array, target_array):
+    """Mismatch count for every sliding window of `array`.
+
+    Accumulates one comparison per target base instead of materializing a
+    windows x target_length matrix, so a 1 Mbp chunk costs ~2 MB instead
+    of ~20 MB. Used by the chunked pipeline.
+    """
+    num_windows = int(array.size) - int(target_array.size) + 1
+
+    if num_windows <= 0:
+        return np.zeros(0, dtype=np.int16)
+
+    counts = np.zeros(num_windows, dtype=np.int16)
+
+    for offset in range(target_array.size):
+        counts += array[offset:offset + num_windows] != target_array[offset]
+
+    return counts
+
+
+def count_mismatches_cuda(array, target_array):
+    """Mismatch count for every sliding window, on the GPU.
+
+    Host -> device transfer, one thread per alignment position, then a
+    single device -> host copy of the counts (not the windows), which is
+    what keeps the transfer small.
+    """
+    from numba import cuda
+
+    from src.cuda_kernels import alignment_kernel
+
+    num_windows = int(array.size) - int(target_array.size) + 1
+
+    if num_windows <= 0:
+        return np.zeros(0, dtype=np.int16)
+
+    sequence_device = cuda.to_device(array)
+    target_device = cuda.to_device(target_array)
+    counts_device = cuda.device_array(num_windows, dtype=np.int32)
+
+    threads_per_block = 256
+    blocks = (num_windows + threads_per_block - 1) // threads_per_block
+
+    alignment_kernel[blocks, threads_per_block](
+        sequence_device,
+        target_device,
+        counts_device,
+    )
+
+    return counts_device.copy_to_host()
+
+
+def count_mismatches(array, target_array, mode="gpu"):
+    """Dispatch mismatch counting to CUDA when available, else numpy."""
+    if mode == "gpu" and cuda_available():
+        return count_mismatches_cuda(array, target_array)
+
+    return count_mismatches_numpy(array, target_array)

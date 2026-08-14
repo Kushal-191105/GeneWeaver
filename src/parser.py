@@ -1,3 +1,14 @@
+"""Input parsing for GeneWeaver.
+
+FASTA is the primary dataset format (`data/genome.fasta`); CSV/TSV tables
+such as `data/human_sequences.csv` are supported as an alternative input.
+Both are loaded into the same DataFrame shape, so the rest of the pipeline
+does not care which one was used.
+"""
+
+import gzip
+import os
+
 import pandas as pd
 
 VALID_BASES = set("ATGCN")
@@ -12,6 +23,8 @@ FASTA_EXTENSIONS = (
     ".frn",
 )
 
+COMPRESSED_EXTENSIONS = (".gz",)
+
 DATASET_COLUMNS = ["sequence_id", "sequence", "length"]
 
 FORMAT_LABELS = {"fasta": "FASTA", "table": "CSV/TSV"}
@@ -22,13 +35,34 @@ def format_label(file_format):
     return FORMAT_LABELS.get(file_format, str(file_format).upper())
 
 
+def is_compressed(filename):
+    """True for files this module should read through gzip."""
+    return filename.lower().endswith(COMPRESSED_EXTENSIONS)
+
+
+def open_text(filename, errors=None):
+    """Open a plain or gzipped text file for reading."""
+    if is_compressed(filename):
+        return gzip.open(filename, "rt", encoding="utf-8", errors=errors)
+
+    return open(filename, "r", encoding="utf-8", errors=errors)
+
+
+def strip_compression(filename):
+    """Drop a trailing .gz so the real extension can be inspected."""
+    if is_compressed(filename):
+        return os.path.splitext(filename)[0]
+
+    return filename
+
+
 def detect_format(filename):
     """Return "fasta" or "table" for a dataset file.
 
-    The extension decides first; if it is unknown the first non-blank line
-    is inspected, and a leading '>' means FASTA.
+    The extension decides first (ignoring a trailing .gz); if it is unknown
+    the first non-blank line is inspected, and a leading '>' means FASTA.
     """
-    extension = os.path.splitext(filename)[1].lower()
+    extension = os.path.splitext(strip_compression(filename))[1].lower()
 
     if extension in FASTA_EXTENSIONS:
         return "fasta"
@@ -37,7 +71,7 @@ def detect_format(filename):
         return "table"
 
     try:
-        with open(filename, "r", encoding="utf-8", errors="ignore") as handle:
+        with open_text(filename, errors="ignore") as handle:
             for line in handle:
                 line = line.strip()
 
@@ -51,7 +85,7 @@ def detect_format(filename):
 
 def _iter_fasta_builtin(filename):
     """Minimal FASTA reader used when BioPython is unavailable."""
-    with open(filename, "r", encoding="utf-8") as handle:
+    with open_text(filename) as handle:
         record_id = None
         chunks = []
 
@@ -90,8 +124,9 @@ def iter_fasta_records(filename):
         yield from _iter_fasta_builtin(filename)
         return
 
-    for record in SeqIO.parse(filename, "fasta"):
-        yield record.id, str(record.seq)
+    with open_text(filename) as handle:
+        for record in SeqIO.parse(handle, "fasta"):
+            yield record.id, str(record.seq)
 
 
 def _finalise(dataset, valid_only=False, limit=None):
@@ -159,7 +194,8 @@ def load_table_dataset(filename, limit=None, valid_only=False):
     Returns a DataFrame with columns: sequence_id, sequence, length
     (plus 'class' when the file provides it).
     """
-    data = pd.read_csv(filename, sep=None, engine="python")
+    with open_text(filename) as handle:
+        data = pd.read_csv(handle, sep=None, engine="python")
 
     columns = {column.lower(): column for column in data.columns}
 

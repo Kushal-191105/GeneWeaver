@@ -21,9 +21,36 @@ Regenerate the FASTA from the CSV at any time:
 python -m src.parser --input data/human_sequences.csv --output data/genome.fasta
 ```
 
+**Chromosome-scale input.** For a genuinely massive run, pull a real chromosome from Ensembl — gzipped FASTA is read directly, no unpacking needed:
+
+```bash
+./scripts/download_chromosome.sh 21          # ~46.7 Mbp, ~15 MB gzipped
+python main.py --input data/Homo_sapiens.GRCh38.dna.chromosome.21.fa.gz --limit 0
+```
+
 Targets live in `data/targets.csv`, one target per row under a `target` column; blank values and `#` lines are ignored.
 
 Runs are limited to the first 200 sequences by default so they finish quickly; `--limit 0` uses all 4380.
+
+## Chunking
+
+A chromosome does not fit comfortably in GPU VRAM, so `src/chunking.py` slices every record into fixed-size `numpy` arrays (1 Mbp by default, `--chunk-size` to change it) and the pipeline streams them through the kernels one at a time.
+
+Two rules keep this scientifically correct:
+
+- **Chunks never span two records.** Joining separate sequences end to end would invent matches that do not exist in the biology.
+- **Consecutive chunks of the same record overlap by `target_length - 1` bases**, so a match straddling a chunk boundary is still fully inside one chunk. Each chunk only reports the first `chunk_size - (target_length - 1)` positions it covers, so the overlap never reports the same match twice.
+
+Chunked results are identical to unchunked results — verified against matches planted deliberately across chunk boundaries.
+
+## TUI dashboard
+
+```bash
+python -m src.dashboard                                  # FASTA default, 200 sequences
+python -m src.dashboard --limit 0 --chunk-size 2000000    # whole dataset
+```
+
+Live view of chunking progress, throughput, backend and device VRAM, plus off-target matches as they are found. The run happens on a background thread so the interface stays responsive; the run logic itself lives in `src/run_state.py` (`AlignmentRun`) so it can be tested without a terminal.
 
 ## How to run Week 2
 

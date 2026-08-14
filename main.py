@@ -3,10 +3,11 @@ import os
 
 import pandas as pd
 
-from src.parser import load_sequence_dataset, read_targets
+from src.parser import format_label, load_sequence_dataset, read_targets
 from src.pipeline import run_alignment
 
-DEFAULT_INPUT = "data/human_sequences.csv"
+DEFAULT_INPUT = "data/genome.fasta"
+FALLBACK_INPUT = "data/human_sequences.csv"
 DEFAULT_TARGET = "data/targets.csv"
 DEFAULT_OUTPUT = "results/matches.csv"
 DEFAULT_LIMIT = 200
@@ -25,12 +26,21 @@ def parse_args():
     parser.add_argument(
         "--input",
         default=DEFAULT_INPUT,
-        help=f"Human DNA dataset, CSV or TSV (default: {DEFAULT_INPUT})",
+        help=(
+            "Human DNA dataset: FASTA (primary) or CSV/TSV "
+            f"(default: {DEFAULT_INPUT})"
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        choices=["auto", "fasta", "csv"],
+        default="auto",
+        help="Force the input format instead of detecting it (default: auto)",
     )
     parser.add_argument(
         "--target",
         default=DEFAULT_TARGET,
-        help=f"Target file, one target per line (default: {DEFAULT_TARGET})",
+        help=f"Target dataset, one target per row (default: {DEFAULT_TARGET})",
     )
     parser.add_argument(
         "--limit",
@@ -64,6 +74,28 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def resolve_input(input_file):
+    """Return the dataset path to use.
+
+    FASTA is the primary dataset. If the default FASTA is missing but the
+    CSV dataset is present, fall back to it instead of failing outright.
+    """
+    if os.path.exists(input_file):
+        return input_file
+
+    if input_file == DEFAULT_INPUT and os.path.exists(FALLBACK_INPUT):
+        print(f"{DEFAULT_INPUT} not found, using {FALLBACK_INPUT} instead.")
+        print(
+            "Regenerate the FASTA with: "
+            f"python -m src.parser --input {FALLBACK_INPUT} "
+            f"--output {DEFAULT_INPUT}\n"
+        )
+
+        return FALLBACK_INPUT
+
+    return input_file
 
 
 def print_dataset_stats(dataset):
@@ -104,11 +136,18 @@ def main():
 
     limit = args.limit if args.limit and args.limit > 0 else None
 
-    dataset = load_sequence_dataset(args.input, limit=limit)
+    input_file = resolve_input(args.input)
+    file_format = None if args.format == "auto" else args.format
+
+    dataset = load_sequence_dataset(
+        input_file,
+        limit=limit,
+        file_format=file_format,
+    )
     targets = read_targets(args.target)
 
     if dataset.empty:
-        raise SystemExit("No sequences found in " + args.input)
+        raise SystemExit("No sequences found in " + input_file)
 
     if not targets:
         raise SystemExit("No targets found in " + args.target)
@@ -117,7 +156,8 @@ def main():
 
     print(f"GeneWeaver - {label} Alignment")
     print(LINE)
-    print("Dataset:", args.input)
+    print("Dataset:", input_file)
+    print("Format:", format_label(dataset.attrs.get("format")))
     print("Sequences:", len(dataset))
     print("Total bases:", int(dataset["length"].sum()))
     print("Targets:", len(targets))

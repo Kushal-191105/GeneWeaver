@@ -1,16 +1,12 @@
 from numba import cuda
+from src.gpu_device import print_gpu_device_info
 
 
 def check_cuda():
-    print("Checking CUDA...")
-
+    print("Checking CUDA environment...")
     if cuda.is_available():
         print("CUDA is available.")
-        print("GPU detected successfully.")
-
-        for gpu in cuda.gpus:
-            print("GPU:", gpu)
-
+        print_gpu_device_info()
     else:
         print("CUDA is not available.")
 

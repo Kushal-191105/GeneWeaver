@@ -30,6 +30,16 @@ def gpu_array_to_dna(array: np.ndarray) -> str:
     return bytes(array).decode("ascii")
 
 
+def transfer_target_to_gpu(target: str):
+    """
+    Transfers a CRISPR target sequence from Host (CPU RAM) to Device (GPU VRAM).
+    Returns (d_target, target_length).
+    """
+    target_arr = dna_to_gpu_array(target)
+    d_target = cuda.to_device(target_arr)
+    return d_target, len(target_arr)
+
+
 @cuda.jit
 def gpu_kernel_skeleton(input_array, output_array):
     """
@@ -41,34 +51,16 @@ def gpu_kernel_skeleton(input_array, output_array):
         output_array[pos] = input_array[pos]
 
 
-def test_simple_gpu_kernel():
+def test_target_transfer():
     """
-    Verifies GPU kernel execution by transferring data to device VRAM,
-    launching the skeleton kernel, and copying the result back to host RAM.
+    Verifies Host-to-Device transfer of target sequence.
     """
-    print("Testing simple GPU kernel execution...")
-    host_input = np.array([65, 84, 71, 67, 65, 84, 71, 67], dtype=np.uint8)
-    n = host_input.size
-
-    # Transfer input to device VRAM and allocate device output
-    d_input = cuda.to_device(host_input)
-    d_output = cuda.device_array(n, dtype=np.uint8)
-
-    # Configure grid and block dimensions
-    threads_per_block = 256
-    blocks_per_grid = math.ceil(n / threads_per_block)
-
-    # Launch kernel on GPU
-    gpu_kernel_skeleton[blocks_per_grid, threads_per_block](d_input, d_output)
-    cuda.synchronize()
-
-    # Copy output back to host RAM
-    host_output = d_output.copy_to_host()
-
-    np.testing.assert_array_equal(host_input, host_output)
-    print(f"Host Input:  {host_input}")
-    print(f"GPU Output:  {host_output}")
-    print("Simple GPU kernel verified successfully on GPU hardware!")
+    test_target = "GCTCGATCGATCGATCGATC"
+    d_target, target_len = transfer_target_to_gpu(test_target)
+    h_target_back = d_target.copy_to_host()
+    reconstructed = gpu_array_to_dna(h_target_back)
+    assert reconstructed == test_target, "Target transfer mismatch!"
+    print(f"Target transferred to GPU VRAM successfully: {reconstructed} (Length: {target_len})")
     return True
 
 
@@ -78,4 +70,4 @@ if __name__ == "__main__":
     print("Original DNA:", test_seq)
     print("GPU-ready uint8 Array:", arr)
     print("Reconstructed DNA:", gpu_array_to_dna(arr))
-    test_simple_gpu_kernel()
+    test_target_transfer()

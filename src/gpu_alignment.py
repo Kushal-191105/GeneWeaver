@@ -51,37 +51,66 @@ def transfer_genome_to_gpu(genome: str):
 
 
 @cuda.jit
-def gpu_kernel_skeleton(input_array, output_array):
+def cuda_exact_match_kernel(genome, target, match_flags, total_positions, target_len):
     """
-    Basic CUDA kernel skeleton demonstrating 1D grid thread indexing.
-    Each GPU thread processes one array element at index `pos`.
+    CUDA Kernel: Checks exact string matching in parallel across GPU threads.
+    Each thread evaluates a single genomic window starting at `pos`.
+    Sets match_flags[pos] = 1 if exact match, otherwise 0.
     """
     pos = cuda.grid(1)
-    if pos < input_array.size:
-        output_array[pos] = input_array[pos]
+    if pos < total_positions:
+        is_match = 1
+        for i in range(target_len):
+            if genome[pos + i] != target[i]:
+                is_match = 0
+                break
+        match_flags[pos] = is_match
 
 
-def test_transfers():
+def gpu_exact_match(genome: str, target: str, threads_per_block: int = 256):
     """
-    Verifies Host-to-Device transfer of target and genome sequences.
+    Performs exact DNA sequence alignment on the GPU.
+    Returns list of starting indices where exact matches occur.
     """
-    test_target = "GCTCGATCGATCGATCGATC"
-    test_genome = "ATGCGATCGATCGCGATCGATCGATCGATCGATCGATC"
+    genome_len = len(genome)
+    target_len = len(target)
+    total_positions = genome_len - target_len + 1
 
-    d_target, target_len = transfer_target_to_gpu(test_target)
-    d_genome, genome_len = transfer_genome_to_gpu(test_genome)
+    if total_positions <= 0:
+        return []
 
-    h_target_back = d_target.copy_to_host()
-    h_genome_back = d_genome.copy_to_host()
+    # Transfer data to GPU
+    d_genome, _ = transfer_genome_to_gpu(genome)
+    d_target, _ = transfer_target_to_gpu(target)
+    d_match_flags = cuda.device_array(total_positions, dtype=np.uint8)
 
-    assert gpu_array_to_dna(h_target_back) == test_target, "Target transfer mismatch!"
-    assert gpu_array_to_dna(h_genome_back) == test_genome, "Genome transfer mismatch!"
+    # Configure grid launch
+    blocks_per_grid = math.ceil(total_positions / threads_per_block)
+    cuda_exact_match_kernel[blocks_per_grid, threads_per_block](
+        d_genome, d_target, d_match_flags, total_positions, target_len
+    )
+    cuda.synchronize()
 
-    print(f"Target transferred to GPU: {len(test_target)} base pairs")
-    print(f"Genome transferred to GPU: {len(test_genome)} base pairs")
-    print("Host-to-Device data transfers verified successfully.")
+    # Collect results from GPU to Host
+    h_match_flags = d_match_flags.copy_to_host()
+    match_indices = np.where(h_match_flags == 1)[0].tolist()
+
+    return match_indices
+
+
+def test_gpu_exact_matching():
+    """
+    Verifies GPU exact matching against sample sequence.
+    """
+    genome = "ATGCGATCGATCGATCGATCGATC"
+    target = "GATC"
+    matches = gpu_exact_match(genome, target)
+    print(f"Target '{target}' exact matches at positions: {matches}")
+    expected = [4, 8, 12, 16, 20]
+    assert matches == expected, f"Expected {expected}, got {matches}"
+    print("GPU exact matching test PASSED.")
     return True
 
 
 if __name__ == "__main__":
-    test_transfers()
+    test_gpu_exact_matching()

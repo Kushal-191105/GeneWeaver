@@ -40,6 +40,16 @@ def transfer_target_to_gpu(target: str):
     return d_target, len(target_arr)
 
 
+def transfer_genome_to_gpu(genome: str):
+    """
+    Transfers a full genomic sequence from Host (CPU RAM) to Device (GPU VRAM).
+    Returns (d_genome, genome_length).
+    """
+    genome_arr = dna_to_gpu_array(genome)
+    d_genome = cuda.to_device(genome_arr)
+    return d_genome, len(genome_arr)
+
+
 @cuda.jit
 def gpu_kernel_skeleton(input_array, output_array):
     """
@@ -51,23 +61,27 @@ def gpu_kernel_skeleton(input_array, output_array):
         output_array[pos] = input_array[pos]
 
 
-def test_target_transfer():
+def test_transfers():
     """
-    Verifies Host-to-Device transfer of target sequence.
+    Verifies Host-to-Device transfer of target and genome sequences.
     """
     test_target = "GCTCGATCGATCGATCGATC"
+    test_genome = "ATGCGATCGATCGCGATCGATCGATCGATCGATCGATC"
+
     d_target, target_len = transfer_target_to_gpu(test_target)
+    d_genome, genome_len = transfer_genome_to_gpu(test_genome)
+
     h_target_back = d_target.copy_to_host()
-    reconstructed = gpu_array_to_dna(h_target_back)
-    assert reconstructed == test_target, "Target transfer mismatch!"
-    print(f"Target transferred to GPU VRAM successfully: {reconstructed} (Length: {target_len})")
+    h_genome_back = d_genome.copy_to_host()
+
+    assert gpu_array_to_dna(h_target_back) == test_target, "Target transfer mismatch!"
+    assert gpu_array_to_dna(h_genome_back) == test_genome, "Genome transfer mismatch!"
+
+    print(f"Target transferred to GPU: {len(test_target)} base pairs")
+    print(f"Genome transferred to GPU: {len(test_genome)} base pairs")
+    print("Host-to-Device data transfers verified successfully.")
     return True
 
 
 if __name__ == "__main__":
-    test_seq = "ATGCGATCGATCG"
-    arr = dna_to_gpu_array(test_seq)
-    print("Original DNA:", test_seq)
-    print("GPU-ready uint8 Array:", arr)
-    print("Reconstructed DNA:", gpu_array_to_dna(arr))
-    test_target_transfer()
+    test_transfers()

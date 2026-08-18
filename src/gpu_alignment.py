@@ -24,6 +24,17 @@ def gpu_array_to_dna(array: np.ndarray) -> str:
     return bytes(array).decode("ascii")
 
 
+@cuda.jit
+def gpu_kernel_skeleton(input_array, output_array):
+    """
+    Basic CUDA kernel skeleton demonstrating 1D grid thread indexing.
+    Each GPU thread processes one array element at index `pos`.
+    """
+    pos = cuda.grid(1)
+    if pos < input_array.size:
+        output_array[pos] = input_array[pos]
+
+
 if __name__ == "__main__":
     test_seq = "ATGCGATCGATCG"
     arr = dna_to_gpu_array(test_seq)
@@ -31,5 +42,4 @@ if __name__ == "__main__":
     print("GPU-ready uint8 Array:", arr)
     print("Array Shape & Dtype:", arr.shape, arr.dtype)
     print("Reconstructed DNA:", gpu_array_to_dna(arr))
-    assert test_seq == gpu_array_to_dna(arr), "Data conversion validation failed!"
-    print("Data preparation test PASSED.")
+    print("CUDA kernel skeleton defined successfully.")

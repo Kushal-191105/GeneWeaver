@@ -1,148 +1,110 @@
-import pandas as pd
-from src.parser import read_fasta, create_chunks
-from src.parser import read_target
+import sys
 import time
-
-from src.cpu_alignment import find_matches_with_mismatches
-
-INPUT_FILE = "data/human_sequences.txt"
-
-data = pd.read_csv(INPUT_FILE, sep="\t")
-
-valid_bases = set("ATGC")
-ambiguous_bases = set("N")
+import pandas as pd
+from src.parser import read_fasta, create_chunks, read_target
+from src.cpu_alignment import find_matches_with_mismatches as cpu_align
+from src.gpu_alignment import gpu_find_matches_with_mismatches as gpu_align
+from src.gpu_device import print_gpu_device_info
+from src.validator import validate_alignment_results
+from benchmark import benchmark_cpu_alignment, benchmark_gpu_alignment
 
 
-def classify_sequence(sequence):
-    sequence = str(sequence).upper().strip()
-    characters = set(sequence)
+def run_pipeline():
+    print("=" * 60)
+    print("   GeneWeaver: GPU-Accelerated CRISPR Alignment Engine   ")
+    print("=" * 60)
 
-    if characters.issubset(valid_bases):
-        return "valid"
+    # 1. Hardware Detection
+    print("\n--- 1. Hardware Inspection ---")
+    print_gpu_device_info()
 
-    if characters.issubset(valid_bases | ambiguous_bases):
-        return "ambiguous"
+    # 2. Sequence Analysis & Ingestion
+    print("\n--- 2. Genomic Dataset Ingestion & Validation ---")
+    input_file = "data/human_sequences.txt"
+    data = pd.read_csv(input_file, sep="\t")
 
-    return "invalid"
+    valid_bases = set("ATGC")
+    ambiguous_bases = set("N")
+
+    def classify_sequence(sequence):
+        sequence = str(sequence).upper().strip()
+        characters = set(sequence)
+        if characters.issubset(valid_bases):
+            return "valid"
+        if characters.issubset(valid_bases | ambiguous_bases):
+            return "ambiguous"
+        return "invalid"
+
+    data["status"] = data["sequence"].apply(classify_sequence)
+    data["length"] = data["sequence"].astype(str).str.len()
+
+    print(f"Total Sequences: {len(data):,}")
+    print(f"Valid Sequences: {(data['status'] == 'valid').sum():,}")
+    print(f"Total Base Pairs: {data['length'].sum():,}")
+    print(f"Average Sequence Length: {round(data['length'].mean(), 2)} bp")
+
+    # 3. FASTA Loading & Chunking
+    print("\n--- 3. Genome Chunking ---")
+    sequences = read_fasta("data/genome.fasta")
+    genome = "".join(sequences)
+    chunk_size = 1000
+    chunks = create_chunks(genome, chunk_size)
+    print(f"Genome Length: {len(genome):,} bp")
+    print(f"Chunk Size: {chunk_size} bp | Number of Chunks: {len(chunks):,}")
+
+    # 4. Target Configuration
+    print("\n--- 4. CRISPR Target Sequence ---")
+    target = read_target("data/target.txt")
+    print(f"Target: {target} (Length: {len(target)} bp)")
+    max_mismatches = 2
+
+    # 5. Parity Validation on 50k bp sample
+    print("\n--- 5. CPU vs GPU Parity Validation ---")
+    validate_alignment_results(genome[:50000], target, max_mismatches=max_mismatches)
+
+    # 6. Benchmark on 200k bp sample
+    sample_len = 200000
+    print(f"\n--- 6. Comparative Benchmark ({sample_len:,} bp) ---")
+    sample_genome = genome[:sample_len]
+
+    print("Running CPU baseline alignment...")
+    cpu_res = benchmark_cpu_alignment(sample_genome, target, max_mismatches=max_mismatches)
+
+    print("Running GPU accelerated alignment...")
+    gpu_res = benchmark_gpu_alignment(sample_genome, target, max_mismatches=max_mismatches)
+
+    speedup = cpu_res["total_cpu_sec"] / gpu_res["total_gpu_sec"]
+    kernel_speedup = cpu_res["total_cpu_sec"] / gpu_res["kernel_execution_sec"]
+
+    print("\n" + "=" * 65)
+    print(f"{'Performance Metric':<30} | {'CPU Baseline':<15} | {'GPU Accelerated':<15}")
+    print("-" * 65)
+    print(f"{'Matches Found':<30} | {cpu_res['matches_count']:<15} | {gpu_res['matches_count']:<15}")
+    print(f"{'Execution Time (Total)':<30} | {cpu_res['total_cpu_sec']*1000:<12.2f} ms | {gpu_res['total_gpu_sec']*1000:<12.2f} ms")
+    print(f"{'CUDA Kernel Only':<30} | {'N/A':<15} | {gpu_res['kernel_execution_sec']*1000:<12.3f} ms")
+    print("-" * 65)
+    print(f"Total Speedup Factor   : {speedup:.2f}x faster")
+    print(f"CUDA Kernel Speedup    : {kernel_speedup:.2f}x faster")
+    print("=" * 65)
+
+    # 7. Full Genome GPU Alignment
+    print("\n--- 7. Full Genome GPU Alignment (5.5M bp) ---")
+    t0 = time.perf_counter()
+    full_matches = gpu_align(genome, target, max_mismatches=max_mismatches)
+    full_gpu_time = time.perf_counter() - t0
+
+    print(f"Full Genome Alignment Completed in: {full_gpu_time*1000:.2f} ms ({full_gpu_time:.4f} s)")
+    print(f"Total Off-Target Matches Identified: {len(full_matches)}")
+    for m in full_matches[:10]:
+        print(f"  Pos {m['position']:,} | Seq: {m['sequence']} | Mismatches: {m['mismatches']}")
+
+    print("\n[SUCCESS] Week 2 Pipeline Integration Verified!")
 
 
-data["status"] = data["sequence"].apply(classify_sequence)
-
-print("Total sequences:", len(data))
-print("Valid sequences:", (data["status"] == "valid").sum())
-print("Ambiguous sequences:", (data["status"] == "ambiguous").sum())
-print("Invalid sequences:", (data["status"] == "invalid").sum())
-
-
-# Sequence length analysis
-data["length"] = data["sequence"].astype(str).str.len()
-
-print("\nSequence Length Statistics:")
-print("Minimum length:", data["length"].min())
-print("Maximum length:", data["length"].max())
-print("Average length:", round(data["length"].mean(), 2))
-print("Total bases:", data["length"].sum())
-
-# Genome statistics
-print("\n========== Genome Statistics ==========")
-
-print("Total sequences:", len(data))
-print("Total bases:", data["length"].sum())
-print("Average sequence length:", round(data["length"].mean(), 2))
-print("Shortest sequence:", data["length"].min())
-print("Longest sequence:", data["length"].max())
-
-print("\nClass distribution:")
-print(data["class"].value_counts().sort_index())
-
-# Genome chunking
-sequences = read_fasta("data/genome.fasta")
-
-genome = "".join(sequences)
-
-chunk_size = 1000
-
-chunks = create_chunks(genome, chunk_size)
-
-print("\n========== Genome Chunking ==========")
-print("Total genome length:", len(genome))
-print("Chunk size:", chunk_size)
-print("Number of chunks:", len(chunks))
-
-print("\nFirst chunk:")
-print(chunks[0])
-
-print("\nFirst chunk length:", len(chunks[0]))
-
-# Chunk validation
-print("\n========== Chunk Validation ==========")
-
-valid_chunks = 0
-invalid_chunks = 0
-
-valid_bases = set("ATGCN")
-
-for chunk in chunks:
-    if set(chunk.upper()).issubset(valid_bases):
-        valid_chunks += 1
+if __name__ == "__main__":
+    if "--tui" in sys.argv:
+        from src.tui import GeneWeaverTUI
+        app = GeneWeaverTUI()
+        app.run()
     else:
-        invalid_chunks += 1
-
-print("Valid chunks:", valid_chunks)
-print("Invalid chunks:", invalid_chunks)
-
-# Check that no DNA was lost during chunking
-reconstructed_genome = "".join(chunks)
-
-print("Original genome length:", len(genome))
-print("Reconstructed length:", len(reconstructed_genome))
-
-if genome == reconstructed_genome:
-    print("Chunk validation: PASSED")
-else:
-    print("Chunk validation: FAILED")
-
-# Read CRISPR target
-target = read_target("data/target.txt")
-
-print("\n========== Target Sequence ==========")
-print("Target:", target)
-print("Target length:", len(target))
-
-# CPU exact alignment
-'''matches = find_exact_matches(genome, target)
-
-print("\n========== CPU Exact Matching ==========")
-print("Target:", target)
-print("Matches found:", len(matches))
-
-for match in matches[:10]:
-    print(match)'''
-
-# Start CPU timer
-start_time = time.perf_counter()
-
-matches = find_matches_with_mismatches(
-    genome,
-    target,
-    max_mismatches=2
-)
-
-# Stop CPU timer
-end_time = time.perf_counter()
-
-execution_time = end_time - start_time
-
-print("\n========== CPU Alignment ==========")
-print("Target:", target)
-print("Maximum mismatches allowed:", 2)
-print("Matches found:", len(matches))
-
-for match in matches[:10]:
-    print(match)
-
-print("\n========== CPU Benchmark ==========")
-print("Genome length:", len(genome))
-print("Target length:", len(target))
-print("Matches found:", len(matches))
-print("CPU execution time:", round(execution_time, 6), "seconds")
+        run_pipeline()

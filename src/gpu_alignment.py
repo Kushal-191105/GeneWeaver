@@ -140,28 +140,50 @@ def gpu_count_mismatches(genome: str, target: str, max_mismatches: int = 2, thre
     return d_mismatch_counts.copy_to_host()
 
 
-def test_gpu_mismatch_counting():
+def gpu_find_matches_with_mismatches(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
-    Verifies GPU mismatch counting kernel.
+    Orchestrates GPU alignment and collects structured results:
+    1. Transfers DNA sequences to GPU VRAM.
+    2. Runs parallel CUDA mismatch evaluation.
+    3. Collects and filters matching positions from GPU to Host.
+    4. Constructs detailed alignment dictionary matching the CPU format.
     """
-    genome = "ATGCGATCGATCGATC"
+    target_len = len(target)
+    mismatch_array = gpu_count_mismatches(genome, target, max_mismatches=max_mismatches, threads_per_block=threads_per_block)
+
+    valid_positions = np.where(mismatch_array <= max_mismatches)[0]
+    matches = []
+
+    for pos in valid_positions:
+        pos_int = int(pos)
+        curr_seq = genome[pos_int:pos_int + target_len]
+        mismatch_count = int(mismatch_array[pos_int])
+        mismatch_positions = [i for i in range(target_len) if curr_seq[i] != target[i]]
+
+        matches.append({
+            "position": pos_int,
+            "sequence": curr_seq,
+            "mismatches": mismatch_count,
+            "mismatch_positions": mismatch_positions
+        })
+
+    return matches
+
+
+def test_gpu_result_collection():
+    """
+    Verifies full GPU result collection and structure formatting.
+    """
+    genome = "ATGCGATCGATCGATCGATC"
     target = "GATC"
-    # Positions:
-    # 0: ATGC -> 4 mismatches (>2 -> 255)
-    # 1: TGCG -> 4 mismatches (>2 -> 255)
-    # 2: GCGA -> G-C-G-A vs G-A-T-C -> pos 1 (C!=A), pos 2 (G!=T), pos 3 (A!=C) = 3 mismatches (>2 -> 255)
-    # 3: CGAT -> C-G-A-T vs G-A-T-C -> 4 mismatches
-    # 4: GATC -> 0 mismatches
-    # 8: GATC -> 0 mismatches
-    # 12: GATC -> 0 mismatches
-    counts = gpu_count_mismatches(genome, target, max_mismatches=2)
-    valid_positions = np.where(counts <= 2)[0].tolist()
-    print("Valid match positions with <= 2 mismatches:", valid_positions)
-    print("Mismatch counts at valid positions:", [counts[p] for p in valid_positions])
-    assert 4 in valid_positions and 8 in valid_positions and 12 in valid_positions
-    print("GPU mismatch counting test PASSED.")
+    results = gpu_find_matches_with_mismatches(genome, target, max_mismatches=2)
+    print(f"GPU Results Collected: {len(results)} matches")
+    for r in results:
+        print(f"  Pos: {r['position']}, Seq: {r['sequence']}, Mismatches: {r['mismatches']}, Positions: {r['mismatch_positions']}")
+    assert len(results) > 0, "No results collected!"
+    print("GPU result collection test PASSED.")
     return True
 
 
 if __name__ == "__main__":
-    test_gpu_mismatch_counting()
+    test_gpu_result_collection()

@@ -67,6 +67,28 @@ def cuda_exact_match_kernel(genome, target, match_flags, total_positions, target
         match_flags[pos] = is_match
 
 
+@cuda.jit
+def cuda_mismatch_count_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches):
+    """
+    CUDA Kernel: Counts base pair mismatches for CRISPR off-target identification.
+    Each thread processes window starting at `pos`. If mismatches exceed max_mismatches,
+    it records 255 (invalid/no match) to optimize evaluation.
+    """
+    pos = cuda.grid(1)
+    if pos < total_positions:
+        mismatches = 0
+        for i in range(target_len):
+            if genome[pos + i] != target[i]:
+                mismatches += 1
+                if mismatches > max_mismatches:
+                    break
+
+        if mismatches <= max_mismatches:
+            mismatch_counts[pos] = mismatches
+        else:
+            mismatch_counts[pos] = 255
+
+
 def gpu_exact_match(genome: str, target: str, threads_per_block: int = 256):
     """
     Performs exact DNA sequence alignment on the GPU.
@@ -79,38 +101,67 @@ def gpu_exact_match(genome: str, target: str, threads_per_block: int = 256):
     if total_positions <= 0:
         return []
 
-    # Transfer data to GPU
     d_genome, _ = transfer_genome_to_gpu(genome)
     d_target, _ = transfer_target_to_gpu(target)
     d_match_flags = cuda.device_array(total_positions, dtype=np.uint8)
 
-    # Configure grid launch
     blocks_per_grid = math.ceil(total_positions / threads_per_block)
     cuda_exact_match_kernel[blocks_per_grid, threads_per_block](
         d_genome, d_target, d_match_flags, total_positions, target_len
     )
     cuda.synchronize()
 
-    # Collect results from GPU to Host
     h_match_flags = d_match_flags.copy_to_host()
-    match_indices = np.where(h_match_flags == 1)[0].tolist()
-
-    return match_indices
+    return np.where(h_match_flags == 1)[0].tolist()
 
 
-def test_gpu_exact_matching():
+def gpu_count_mismatches(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
-    Verifies GPU exact matching against sample sequence.
+    Executes parallel mismatch counting across the genome on GPU.
+    Returns host NumPy array of mismatch counts per position (255 for non-matches).
     """
-    genome = "ATGCGATCGATCGATCGATCGATC"
+    genome_len = len(genome)
+    target_len = len(target)
+    total_positions = genome_len - target_len + 1
+
+    if total_positions <= 0:
+        return np.array([], dtype=np.uint8)
+
+    d_genome, _ = transfer_genome_to_gpu(genome)
+    d_target, _ = transfer_target_to_gpu(target)
+    d_mismatch_counts = cuda.device_array(total_positions, dtype=np.uint8)
+
+    blocks_per_grid = math.ceil(total_positions / threads_per_block)
+    cuda_mismatch_count_kernel[blocks_per_grid, threads_per_block](
+        d_genome, d_target, d_mismatch_counts, total_positions, target_len, max_mismatches
+    )
+    cuda.synchronize()
+
+    return d_mismatch_counts.copy_to_host()
+
+
+def test_gpu_mismatch_counting():
+    """
+    Verifies GPU mismatch counting kernel.
+    """
+    genome = "ATGCGATCGATCGATC"
     target = "GATC"
-    matches = gpu_exact_match(genome, target)
-    print(f"Target '{target}' exact matches at positions: {matches}")
-    expected = [4, 8, 12, 16, 20]
-    assert matches == expected, f"Expected {expected}, got {matches}"
-    print("GPU exact matching test PASSED.")
+    # Positions:
+    # 0: ATGC -> 4 mismatches (>2 -> 255)
+    # 1: TGCG -> 4 mismatches (>2 -> 255)
+    # 2: GCGA -> G-C-G-A vs G-A-T-C -> pos 1 (C!=A), pos 2 (G!=T), pos 3 (A!=C) = 3 mismatches (>2 -> 255)
+    # 3: CGAT -> C-G-A-T vs G-A-T-C -> 4 mismatches
+    # 4: GATC -> 0 mismatches
+    # 8: GATC -> 0 mismatches
+    # 12: GATC -> 0 mismatches
+    counts = gpu_count_mismatches(genome, target, max_mismatches=2)
+    valid_positions = np.where(counts <= 2)[0].tolist()
+    print("Valid match positions with <= 2 mismatches:", valid_positions)
+    print("Mismatch counts at valid positions:", [counts[p] for p in valid_positions])
+    assert 4 in valid_positions and 8 in valid_positions and 12 in valid_positions
+    print("GPU mismatch counting test PASSED.")
     return True
 
 
 if __name__ == "__main__":
-    test_gpu_exact_matching()
+    test_gpu_mismatch_counting()

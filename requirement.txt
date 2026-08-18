@@ -5,3 +5,4 @@ numba
 cuda-python
 nvidia-cuda-runtime-cu12
 nvidia-cuda-nvcc-cu12
+nvidia-cuda-nvrtc-cu12

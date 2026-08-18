@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.widgets import Header, Footer, Static, Label, Button, RichLog
+from textual.widgets import Header, Footer, Static, Label, Button, RichLog, ProgressBar
 from src.gpu_device import get_gpu_device_info
 
 
@@ -45,6 +45,13 @@ class GeneWeaverTUI(App):
     #main-panel {
         width: 65%;
     }
+    #progress-container {
+        height: auto;
+        margin-bottom: 1;
+        padding: 1;
+        background: #0f172a;
+        border: round #64748b;
+    }
     #log-panel {
         height: 100%;
         background: #0f172a;
@@ -79,6 +86,11 @@ class GeneWeaverTUI(App):
                     yield Label("Max Mismatches: 2")
 
             with Vertical(id="main-panel"):
+                with Container(id="progress-container"):
+                    yield Label("PIPELINE PROGRESS", classes="card-title")
+                    yield Label("Status: Ready", id="status-label")
+                    yield ProgressBar(id="pipeline-progress", show_percentage=True, show_eta=False, total=100)
+
                 with Container(classes="panel"):
                     yield Label("EXECUTION & ACTIVITY LOG", classes="card-title")
                     yield RichLog(id="log-panel", highlight=True, markup=True)
@@ -89,11 +101,17 @@ class GeneWeaverTUI(App):
         log.write("[bold green]GeneWeaver TUI Initialized.[/bold green]")
         log.write("[cyan]Press [bold]R[/bold] to run sequence alignment, [bold]B[/bold] to run benchmark, [bold]Q[/bold] to quit.[/cyan]")
 
+    def update_progress(self, progress: float, status_text: str) -> None:
+        """Updates the TUI progress bar and current status text."""
+        p_bar = self.query_one("#pipeline-progress", ProgressBar)
+        s_lbl = self.query_one("#status-label", Label)
+        p_bar.progress = progress
+        s_lbl.update(f"Status: {status_text}")
+
 
 if __name__ == "__main__":
     app = GeneWeaverTUI()
-    # Smoke test headless run if requested
     if "--smoke-test" in sys.argv:
-        print("GeneWeaver TUI Skeleton compiled successfully.")
+        print("GeneWeaver TUI with Progress Bar compiled successfully.")
     else:
         app.run()

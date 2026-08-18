@@ -2,22 +2,18 @@ import time
 import math
 import numpy as np
 from src.parser import read_fasta, read_target
+from src.cpu_alignment import find_matches_with_mismatches as cpu_align
 from src.gpu_alignment import (
     transfer_genome_to_gpu,
     transfer_target_to_gpu,
     cuda_mismatch_count_kernel,
-    gpu_find_matches_with_mismatches,
 )
 from numba import cuda
 
 
 def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
-    Measures detailed GPU alignment execution times:
-    - Data transfer (H2D)
-    - Kernel execution
-    - Data transfer (D2H)
-    - Total end-to-end GPU time
+    Measures detailed GPU alignment execution times.
     """
     # 1. Warm-up JIT compilation on a tiny dummy sequence
     dummy_g, _ = transfer_genome_to_gpu("ATGC" * 10)
@@ -65,27 +61,59 @@ def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, t
     }
 
 
-def run_gpu_benchmark():
-    print("========== GPU Alignment Benchmark ==========")
+def benchmark_cpu_alignment(genome: str, target: str, max_mismatches: int = 2):
+    """
+    Measures standard single-threaded CPU alignment execution time.
+    """
+    t0 = time.perf_counter()
+    cpu_matches = cpu_align(genome, target, max_mismatches=max_mismatches)
+    t_cpu = time.perf_counter() - t0
+    return {
+        "matches_count": len(cpu_matches),
+        "total_cpu_sec": t_cpu,
+    }
+
+
+def compare_cpu_vs_gpu(sample_length: int = 200000):
+    """
+    Performs head-to-head performance audit between CPU and GPU alignment engines.
+    """
+    print(f"\n========== CPU vs GPU Benchmark Comparison (Sample: {sample_length:,} bp) ==========")
     sequences = read_fasta("data/genome.fasta")
-    genome = "".join(sequences)
+    genome = "".join(sequences)[:sample_length]
     target = read_target("data/target.txt")
 
-    print(f"Genome Length: {len(genome):,} base pairs")
-    print(f"Target Sequence: {target} (Length: {len(target)})")
-    print(f"Max Mismatches: 2")
-    print("Running GPU alignment benchmark...")
+    print(f"Target Sequence: {target} (Len: {len(target)}) | Max Mismatches: 2")
 
-    results = benchmark_gpu_alignment(genome, target, max_mismatches=2)
+    # Run CPU Benchmark
+    print("Running CPU alignment...")
+    cpu_res = benchmark_cpu_alignment(genome, target, max_mismatches=2)
 
-    print("\n--- GPU Benchmark Results ---")
-    print(f"Matches Found:           {results['matches_count']}")
-    print(f"Host-to-Device Transfer: {results['h2d_transfer_sec'] * 1000:.3f} ms ({results['h2d_transfer_sec']:.6f} s)")
-    print(f"CUDA Kernel Execution:   {results['kernel_execution_sec'] * 1000:.3f} ms ({results['kernel_execution_sec']:.6f} s)")
-    print(f"Device-to-Host Transfer: {results['d2h_transfer_sec'] * 1000:.3f} ms ({results['d2h_transfer_sec']:.6f} s)")
-    print(f"Total GPU Execution Time:{results['total_gpu_sec'] * 1000:.3f} ms ({results['total_gpu_sec']:.6f} s)")
-    print("=============================================")
+    # Run GPU Benchmark
+    print("Running GPU alignment...")
+    gpu_res = benchmark_gpu_alignment(genome, target, max_mismatches=2)
+
+    speedup_total = cpu_res["total_cpu_sec"] / gpu_res["total_gpu_sec"]
+    speedup_kernel = cpu_res["total_cpu_sec"] / gpu_res["kernel_execution_sec"]
+
+    print("\n" + "=" * 65)
+    print(f"{'Performance Metric':<30} | {'CPU Baseline':<15} | {'GPU Accelerated':<15}")
+    print("-" * 65)
+    print(f"{'Matches Found':<30} | {cpu_res['matches_count']:<15} | {gpu_res['matches_count']:<15}")
+    print(f"{'Execution Time (Total)':<30} | {cpu_res['total_cpu_sec']*1000:<12.2f} ms | {gpu_res['total_gpu_sec']*1000:<12.2f} ms")
+    print(f"{'CUDA Kernel Only':<30} | {'N/A':<15} | {gpu_res['kernel_execution_sec']*1000:<12.3f} ms")
+    print("-" * 65)
+    print(f"Total End-to-End Speedup : {speedup_total:.2f}x faster")
+    print(f"Pure Kernel Speedup       : {speedup_kernel:.2f}x faster")
+    print("=" * 65 + "\n")
+
+    return {
+        "cpu": cpu_res,
+        "gpu": gpu_res,
+        "speedup_total": speedup_total,
+        "speedup_kernel": speedup_kernel,
+    }
 
 
 if __name__ == "__main__":
-    run_gpu_benchmark()
+    compare_cpu_vs_gpu(sample_length=200000)

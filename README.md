@@ -10,7 +10,7 @@ GeneWeaver is a high-performance bioinformatics engine designed to rapidly searc
 
 ---
 
-## Week 2 Features & Architecture
+##  Features & Architecture
 
 - **GPU Device Querying:** Automatic hardware introspection (VRAM, SM count, Compute Capability).
 - **Zero-Overhead Memory Transfers:** Contiguous uint8 ASCII byte representation for DMA host-to-device transfers.

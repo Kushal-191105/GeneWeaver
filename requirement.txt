@@ -2,3 +2,6 @@ numpy
 pandas
 biopython
 numba
+cuda-python
+nvidia-cuda-runtime-cu12
+nvidia-cuda-nvcc-cu12

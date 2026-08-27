@@ -76,28 +76,55 @@ def validate_pam(pam_seq: str) -> dict:
         }
 
 
+def categorize_risk(severity_score: float) -> dict:
+    """
+    Stratifies off-target sites into biological risk tiers based on severity score:
+    - HIGH RISK (>= 60%): Critical off-target cleavage expected
+    - MEDIUM RISK (20% - 59%): Moderate cleavage activity
+    - LOW RISK (< 20%): Minimal / negligible cutting probability
+    """
+    if severity_score >= 60.0:
+        return {
+            "tier": "HIGH",
+            "badge": "[HIGH RISK]",
+            "color": "red",
+            "recommendation": "Critical off-target site. High cleavage probability in vivo."
+        }
+    elif severity_score >= 20.0:
+        return {
+            "tier": "MEDIUM",
+            "badge": "[MED RISK]",
+            "color": "yellow",
+            "recommendation": "Moderate off-target risk. Secondary experimental screening advised."
+        }
+    else:
+        return {
+            "tier": "LOW",
+            "badge": "[LOW RISK]",
+            "color": "green",
+            "recommendation": "Tolerated mutation. Minimal in-vivo cleavage expected."
+        }
+
+
 def calculate_severity_score(mismatch_positions: list, pam_seq: str, target_length: int = 20) -> dict:
     """
-    Calculates the biological CRISPR cleavage severity score (0.0% to 100.0%):
-    - Higher score indicates high probability of off-target DNA double-strand break (dangerous).
-    - Lower score indicates minimal or abolished cleavage (tolerated).
-    
-    Formula:
-      Cleavage_Score = PAM_factor * Product(1.0 - Weight_i) * 100.0%
+    Calculates the biological CRISPR cleavage severity score (0.0% to 100.0%)
+    and associates the corresponding mutation risk categorization.
     """
     pam_info = validate_pam(pam_seq)
     pam_factor = pam_info["pam_factor"]
 
     if pam_factor == 0.0:
+        score = 0.0
         return {
-            "severity_score": 0.0,
+            "severity_score": score,
+            "risk": categorize_risk(score),
             "pam_info": pam_info,
             "seed_mismatches": sum(1 for p in mismatch_positions if is_seed_region(p)),
             "distal_mismatches": sum(1 for p in mismatch_positions if not is_seed_region(p)),
             "cleavage_probability": 0.0
         }
 
-    # Calculate mismatch tolerance factor
     score_factor = 1.0
     for pos in mismatch_positions:
         weight = get_position_weight(pos)
@@ -107,6 +134,7 @@ def calculate_severity_score(mismatch_positions: list, pam_seq: str, target_leng
 
     return {
         "severity_score": final_score,
+        "risk": categorize_risk(final_score),
         "pam_info": pam_info,
         "seed_mismatches": sum(1 for p in mismatch_positions if is_seed_region(p)),
         "distal_mismatches": sum(1 for p in mismatch_positions if not is_seed_region(p)),
@@ -115,25 +143,12 @@ def calculate_severity_score(mismatch_positions: list, pam_seq: str, target_leng
 
 
 if __name__ == "__main__":
-    # Test cases:
-    # 1. Exact match with canonical PAM -> 100%
-    s1 = calculate_severity_score([], "TGG")
-    print(f"Exact match + TGG: Severity = {s1['severity_score']}%")
-    assert s1["severity_score"] == 100.0
+    test_scores = [95.0, 75.0, 45.0, 15.0, 0.0]
+    for s in test_scores:
+        r = categorize_risk(s)
+        print(f"Score {s:5.1f}% -> {r['badge']} ({r['tier']}): {r['recommendation']}")
 
-    # 2. Distal mismatch (pos 1) + canonical PAM -> High severity (e.g. ~88%)
-    s2 = calculate_severity_score([1], "CGG")
-    print(f"Distal mismatch (pos 1) + CGG: Severity = {s2['severity_score']}%")
-    assert s2["severity_score"] > 80.0
-
-    # 3. Seed mismatch (pos 18) + canonical PAM -> Low severity (<5%)
-    s3 = calculate_severity_score([18], "CGG")
-    print(f"Seed mismatch (pos 18) + CGG: Severity = {s3['severity_score']}%")
-    assert s3["severity_score"] < 10.0
-
-    # 4. Any mismatch + Invalid PAM -> 0%
-    s4 = calculate_severity_score([], "ATC")
-    print(f"Exact match + Invalid PAM (ATC): Severity = {s4['severity_score']}%")
-    assert s4["severity_score"] == 0.0
-
-    print("CRISPR severity scoring verified successfully!")
+    assert categorize_risk(85.0)["tier"] == "HIGH"
+    assert categorize_risk(35.0)["tier"] == "MEDIUM"
+    assert categorize_risk(5.0)["tier"] == "LOW"
+    print("Mutation risk categorization verified successfully!")

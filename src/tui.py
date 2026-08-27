@@ -23,6 +23,43 @@ from src.scoring import rank_off_targets
 from benchmark import benchmark_gpu_alignment, benchmark_cpu_alignment
 
 
+def format_rich_off_target(item: dict) -> str:
+    """
+    Renders an off-target match candidate with color-coded biological severity badges
+    and formatted PAM motifs for Rich/Textual terminal display.
+    """
+    tier = item.get("risk_tier", "LOW")
+    score = item.get("severity_score", 0.0)
+    pam = item.get("pam", "NNN")
+    pam_type = item.get("pam_type", "invalid")
+    pos = item.get("position", 0)
+    seq = item.get("sequence", "")
+
+    # Badge styling
+    if tier == "HIGH":
+        badge = "[bold white on red] HIGH RISK [/bold white on red]"
+        score_str = f"[bold red]{score:5.1f}%[/bold red]"
+    elif tier == "MEDIUM":
+        badge = "[bold black on yellow] MED RISK [/bold black on yellow]"
+        score_str = f"[bold yellow]{score:5.1f}%[/bold yellow]"
+    else:
+        badge = "[bold white on green] LOW RISK [/bold white on green]"
+        score_str = f"[bold green]{score:5.1f}%[/bold green]"
+
+    # PAM motif styling
+    if pam_type == "canonical":
+        pam_str = f"[bold cyan]{pam}[/bold cyan] (Canonical NGG)"
+    elif pam_type == "non-canonical":
+        pam_str = f"[yellow]{pam}[/yellow] (Non-canonical NAG)"
+    else:
+        pam_str = f"[dim red]{pam}[/dim red] (Non-viable)"
+
+    return (
+        f"  #{item.get('rank', 1):<2} | Pos: [bold]{pos:<9,}[/bold] | Seq: [white]{seq}[/white] | "
+        f"PAM: {pam_str} | Score: {score_str} | {badge}"
+    )
+
+
 class GeneWeaverTUI(App):
     """
     Interactive Terminal User Interface for GeneWeaver CRISPR Alignment Engine.
@@ -164,8 +201,8 @@ class GeneWeaverTUI(App):
         self.call_from_thread(self.update_progress, 100, f"Completed in {gpu_duration*1000:.2f} ms")
         log.write(f"[bold green]✓ Single-GPU Completed![/bold green] Scored [bold]{len(ranked)}[/bold] off-target site(s) in {gpu_duration*1000:.2f} ms.")
 
-        for r in ranked[:5]:
-            log.write(f"  → Rank #{r['rank']} | Pos {r['position']:,} | PAM {r['pam']} | Score: [bold]{r['severity_score']}%[/bold] | {r['risk_badge']}")
+        for r in ranked[:10]:
+            log.write(format_rich_off_target(r))
 
     @work(thread=True)
     def action_run_dask(self) -> None:
@@ -186,11 +223,10 @@ class GeneWeaverTUI(App):
         dist_duration = time.perf_counter() - t0
 
         self.call_from_thread(self.update_progress, 100, f"Dask Complete in {dist_duration*1000:.2f} ms")
-        log.write(f"[bold green]✓ Dask Distributed Complete![/bold green] Gathered [bold]{len(ranked)}[/bold] deduplicated hits.")
-        log.write(f"[magenta]Total Distributed Time: {dist_duration*1000:.2f} ms[/magenta]")
+        log.write(f"[bold green]✓ Dask Distributed Complete![/bold green] Gathered [bold]{len(ranked)}[/bold] deduplicated hits in {dist_duration*1000:.2f} ms.")
 
-        for r in ranked[:5]:
-            log.write(f"  → Rank #{r['rank']} | Pos {r['position']:,} | PAM {r['pam']} ({r['pam_type']}) | Score: [bold]{r['severity_score']}%[/bold] | {r['risk_badge']}")
+        for r in ranked[:10]:
+            log.write(format_rich_off_target(r))
 
     @work(thread=True)
     def action_run_benchmark(self) -> None:
@@ -221,6 +257,6 @@ class GeneWeaverTUI(App):
 if __name__ == "__main__":
     app = GeneWeaverTUI()
     if "--smoke-test" in sys.argv:
-        print("Updated TUI layout with Dask cluster telemetry successfully.")
+        print("Added severity color formatting in TUI successfully.")
     else:
         app.run()

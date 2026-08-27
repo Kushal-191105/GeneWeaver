@@ -1,8 +1,14 @@
 import os
 import sys
+
+# Ensure project root in sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import math
+import dask
 from dask.distributed import Client, LocalCluster
 from numba import cuda
+from src.gpu_alignment import gpu_find_matches_with_mismatches
 
 
 def get_available_gpus() -> list:
@@ -50,8 +56,6 @@ def init_worker_cuda_context(worker_index: int = 0) -> dict:
 def partition_genome_for_workers(genome: str, target_length: int = 20, n_batches: int = 4) -> list:
     """
     Partitions a genomic sequence into balanced batches for distributed Dask workers.
-    Includes an overlap of (target_length + 3) bp to prevent boundary truncation of
-    target protospacers and adjacent PAM motifs.
     """
     genome_len = len(genome)
     overlap = target_length + 3  # Target + PAM length
@@ -76,7 +80,6 @@ def partition_genome_for_workers(genome: str, target_length: int = 20, n_batches
         if start >= genome_len:
             break
 
-        # Extend end boundary by overlap unless it is the final batch
         if i == n_batches - 1:
             end = genome_len
         else:
@@ -91,6 +94,40 @@ def partition_genome_for_workers(genome: str, target_length: int = 20, n_batches
         })
 
     return batches
+
+
+def process_batch_alignment(batch: dict, target: str, max_mismatches: int = 2, worker_index: int = 0) -> list:
+    """
+    Core worker execution routine:
+    1. Sets up GPU context for the worker.
+    2. Runs high-throughput CUDA alignment on the batch slice.
+    3. Remaps local batch coordinates to absolute global genome positions.
+    """
+    init_worker_cuda_context(worker_index)
+
+    batch_seq = batch["sequence"]
+    start_offset = batch["start_offset"]
+    batch_id = batch["batch_id"]
+
+    local_matches = gpu_find_matches_with_mismatches(batch_seq, target, max_mismatches=max_mismatches)
+    global_matches = []
+
+    for m in local_matches:
+        global_pos = start_offset + m["position"]
+        match_record = dict(m)
+        match_record["position"] = global_pos
+        match_record["batch_id"] = batch_id
+        global_matches.append(match_record)
+
+    return global_matches
+
+
+@dask.delayed
+def delayed_align_batch(batch: dict, target: str, max_mismatches: int = 2, worker_index: int = 0):
+    """
+    Dask delayed wrapper around batch alignment for asynchronous DAG construction.
+    """
+    return process_batch_alignment(batch, target, max_mismatches, worker_index)
 
 
 def get_dask_cluster(n_workers: int = 2, threads_per_worker: int = 1, memory_limit: str = "2GB"):
@@ -156,16 +193,20 @@ def close_dask_cluster(client: Client, cluster: LocalCluster = None):
 
 
 if __name__ == "__main__":
-    print("Testing distributed chunk partitioner...")
-    test_genome = "A" * 10000 + "C" * 10000 + "G" * 10000 + "T" * 10000
-    target_l = 20
-    batches = partition_genome_for_workers(test_genome, target_length=target_l, n_batches=4)
-    print(f"Total genome: {len(test_genome)} bp partitioned into {len(batches)} batches:")
+    print("Testing process_batch_alignment and delayed_align_batch...")
+    dummy_batch = {
+        "batch_id": 1,
+        "start_offset": 500,
+        "end_offset": 540,
+        "sequence": "GATC" * 10,
+        "length": 40
+    }
+    target = "GATC"
+    results = process_batch_alignment(dummy_batch, target, max_mismatches=0)
+    print(f"Batch Alignment found {len(results)} matches:")
+    for r in results[:3]:
+        print(f"  Batch {r['batch_id']} | Global Pos: {r['position']} | Seq: {r['sequence']}")
 
-    for b in batches:
-        print(f"  Batch {b['batch_id']}: offsets [{b['start_offset']:,} -> {b['end_offset']:,}], len={b['length']:,} bp")
-
-    assert len(batches) == 4
-    # Check that overlap covers boundaries
-    assert batches[0]["end_offset"] > batches[1]["start_offset"]
-    print("Distributed chunk partitioner verified successfully!")
+    assert len(results) > 0
+    assert results[0]["position"] >= 500
+    print("Dask delayed alignment task verified successfully!")

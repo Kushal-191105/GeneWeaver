@@ -9,6 +9,7 @@ import dask
 from dask.distributed import Client, LocalCluster
 from numba import cuda
 from src.gpu_alignment import gpu_find_matches_with_mismatches
+from src.scoring import rank_off_targets
 
 
 def get_available_gpus() -> list:
@@ -149,15 +150,45 @@ def dispatch_parallel_alignment(genome: str, target: str, max_mismatches: int = 
         for i, batch in enumerate(batches)
     ]
 
-    # Concurrent parallel execution
     if client:
         futures = client.compute(delayed_tasks)
         batch_results = client.gather(futures)
     else:
-        # Use single-threaded/synchronous scheduler for local fallback to preserve CUDA driver context
         batch_results = dask.compute(*delayed_tasks, scheduler="synchronous")
 
     return list(batch_results)
+
+
+def gather_and_deduplicate_results(batch_results: list) -> list:
+    """
+    Aggregates distributed batch outputs, removes boundary duplicates caused by chunk overlap,
+    and sorts all matches in ascending order of genomic position.
+    """
+    seen_positions = set()
+    unique_matches = []
+
+    for batch in batch_results:
+        for match in batch:
+            pos = match["position"]
+            if pos not in seen_positions:
+                seen_positions.add(pos)
+                unique_matches.append(match)
+
+    unique_matches.sort(key=lambda x: x["position"])
+    return unique_matches
+
+
+def run_distributed_pipeline(genome: str, target: str, max_mismatches: int = 2, n_batches: int = 4, client: Client = None) -> list:
+    """
+    High-level distributed execution pipeline:
+    1. Dispatches genomic batches across workers.
+    2. Gathers and deduplicates hits across boundary overlaps.
+    3. Enriches with biological PAM scoring and ranks by severity.
+    """
+    batch_outputs = dispatch_parallel_alignment(genome, target, max_mismatches=max_mismatches, n_batches=n_batches, client=client)
+    merged_matches = gather_and_deduplicate_results(batch_outputs)
+    ranked_off_targets = rank_off_targets(merged_matches, genome, target)
+    return ranked_off_targets
 
 
 def get_dask_cluster(n_workers: int = 2, threads_per_worker: int = 1, memory_limit: str = "2GB"):
@@ -223,11 +254,15 @@ def close_dask_cluster(client: Client, cluster: LocalCluster = None):
 
 
 if __name__ == "__main__":
-    print("Testing dispatch_parallel_alignment across batches...")
-    test_seq = "ATGCCCCAACTAAATACTAC" * 5
+    print("Testing distributed result gathering and deduplication...")
+    test_seq = "ATGCCCCAACTAAATACTAC" + "TGG" + "ATGCCCCAACTAAATACTAC" + "CGG" + "GATC" * 50
     target_seq = "ATGCCCCAACTAAATACTAC"
-    batch_outputs = dispatch_parallel_alignment(test_seq, target_seq, max_mismatches=0, n_batches=3)
-    total_found = sum(len(b) for b in batch_outputs)
-    print(f"Dispatched across 3 batches, returned {len(batch_outputs)} batch outputs with {total_found} total hits.")
-    assert len(batch_outputs) == 3
-    print("Parallel task dispatch verified successfully!")
+
+    ranked = run_distributed_pipeline(test_seq, target_seq, max_mismatches=0, n_batches=4)
+    print(f"Distributed Pipeline returned {len(ranked)} ranked matches:")
+    for r in ranked:
+        print(f"  Rank #{r['rank']} | Pos: {r['position']} | PAM: {r['pam']} | Score: {r['severity_score']}% | Risk: {r['risk_badge']}")
+
+    assert len(ranked) == 2
+    assert ranked[0]["position"] < ranked[1]["position"] or ranked[0]["severity_score"] >= ranked[1]["severity_score"]
+    print("Distributed result gathering and ranking verified successfully!")

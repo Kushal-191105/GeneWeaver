@@ -8,6 +8,7 @@ from src.gpu_alignment import (
     transfer_target_to_gpu,
     cuda_mismatch_count_kernel,
 )
+from src.distributed_scheduler import dispatch_parallel_alignment, gather_and_deduplicate_results
 from numba import cuda
 
 
@@ -74,6 +75,50 @@ def benchmark_cpu_alignment(genome: str, target: str, max_mismatches: int = 2):
     }
 
 
+def benchmark_distributed_scaling(genome: str, target: str, max_mismatches: int = 2, batch_counts: list = None):
+    """
+    Benchmarks distributed Dask chunk scheduling across varying batch partition counts.
+    Evaluates multi-batch parallel throughput and overhead.
+    """
+    if batch_counts is None:
+        batch_counts = [1, 2, 4, 8]
+
+    print("\n========== Dask Distributed Scaling Benchmark ==========")
+    print(f"Dataset Size: {len(genome):,} bp | Target: {target} (len: {len(target)})")
+
+    results = []
+    baseline_time = None
+
+    for n_b in batch_counts:
+        t0 = time.perf_counter()
+        raw_outputs = dispatch_parallel_alignment(genome, target, max_mismatches=max_mismatches, n_batches=n_b)
+        unique_matches = gather_and_deduplicate_results(raw_outputs)
+        duration = time.perf_counter() - t0
+
+        if baseline_time is None:
+            baseline_time = duration
+
+        speedup_rel = baseline_time / duration if duration > 0 else 1.0
+        throughput_mbps = (len(genome) / 1e6) / duration if duration > 0 else 0.0
+
+        results.append({
+            "batches": n_b,
+            "duration_ms": duration * 1000,
+            "matches": len(unique_matches),
+            "throughput_mbps": throughput_mbps,
+            "speedup_rel": speedup_rel
+        })
+
+    print("-" * 75)
+    print(f"{'Partitions':<12} | {'Time (ms)':<14} | {'Matches':<10} | {'Throughput (Mbp/s)':<20} | {'Scaling':<10}")
+    print("-" * 75)
+    for r in results:
+        print(f"{r['batches']:<12} | {r['duration_ms']:<14.2f} | {r['matches']:<10} | {r['throughput_mbps']:<20.2f} | {r['speedup_rel']:<10.2f}x")
+    print("-" * 75)
+
+    return results
+
+
 def compare_cpu_vs_gpu(sample_length: int = 200000):
     """
     Performs head-to-head performance audit between CPU and GPU alignment engines.
@@ -115,8 +160,7 @@ def compare_cpu_vs_gpu(sample_length: int = 200000):
 
 def run_repeated_benchmark(iterations: int = 5, sample_length: int = 200000):
     """
-    Executes multiple benchmark iterations to calculate statistical distribution
-    (mean, median, min, max, std dev) for reliable timing.
+    Executes multiple benchmark iterations to calculate statistical distribution.
     """
     print(f"\n========== Repeated Benchmark Suite ({iterations} Trials, {sample_length:,} bp) ==========")
     sequences = read_fasta("data/genome.fasta")
@@ -127,16 +171,13 @@ def run_repeated_benchmark(iterations: int = 5, sample_length: int = 200000):
     gpu_total_times = []
     gpu_kernel_times = []
 
-    # Warm up GPU
     benchmark_gpu_alignment(genome[:1000], target, max_mismatches=2)
 
     for i in range(1, iterations + 1):
         print(f"Trial {i}/{iterations}...", end=" ", flush=True)
-        # CPU run
         c_res = benchmark_cpu_alignment(genome, target, max_mismatches=2)
         cpu_times.append(c_res["total_cpu_sec"] * 1000)
 
-        # GPU run
         g_res = benchmark_gpu_alignment(genome, target, max_mismatches=2)
         gpu_total_times.append(g_res["total_gpu_sec"] * 1000)
         gpu_kernel_times.append(g_res["kernel_execution_sec"] * 1000)
@@ -171,4 +212,10 @@ def run_repeated_benchmark(iterations: int = 5, sample_length: int = 200000):
 
 
 if __name__ == "__main__":
-    run_repeated_benchmark(iterations=3, sample_length=200000)
+    seqs = read_fasta("data/genome.fasta")
+    g = "".join(seqs)[:200000]
+    t = read_target("data/target.txt")
+
+    # Run comparative and distributed scaling benchmarks
+    compare_cpu_vs_gpu(sample_length=200000)
+    benchmark_distributed_scaling(g, t, max_mismatches=2, batch_counts=[1, 2, 4])

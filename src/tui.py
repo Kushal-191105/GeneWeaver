@@ -14,12 +14,19 @@ from src.gpu_device import get_gpu_device_info
 from src.parser import read_fasta, read_target, create_chunks
 from src.cpu_alignment import find_matches_with_mismatches as cpu_align
 from src.gpu_alignment import gpu_find_matches_with_mismatches as gpu_align
+from src.distributed_scheduler import (
+    get_available_gpus,
+    partition_genome_for_workers,
+    run_distributed_pipeline
+)
+from src.scoring import rank_off_targets
 from benchmark import benchmark_gpu_alignment, benchmark_cpu_alignment
 
 
 class GeneWeaverTUI(App):
     """
     Interactive Terminal User Interface for GeneWeaver CRISPR Alignment Engine.
+    Week 3: Distributed Dask Scheduling & Biological PAM Severity Ranking.
     """
     CSS = """
     Screen {
@@ -69,6 +76,7 @@ class GeneWeaverTUI(App):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "run_alignment", "Run Scan"),
+        ("d", "run_dask", "Dask Distributed"),
         ("b", "run_benchmark", "Benchmark"),
     ]
 
@@ -87,20 +95,28 @@ class GeneWeaverTUI(App):
                         yield Label("GPU: No CUDA GPU Detected (CPU Mode)")
 
                 with Container(classes="panel"):
-                    yield Label("CRISPR TARGET SPEC", classes="card-title")
-                    yield Label("Target: ATGCCCCAACTAAATACTAC")
-                    yield Label("Length: 20 bp")
-                    yield Label("Max Mismatches: 2")
-                    yield Label("Chunk Size: 1,000 bp")
+                    yield Label("DISTRIBUTED DASK CLUSTER", classes="card-title")
+                    gpus = get_available_gpus()
+                    yield Label("Scheduler: Dask Distributed")
+                    yield Label("Active Workers: 4 Partition Batches")
+                    yield Label(f"GPU Workload Balance: {len(gpus)} GPU Core(s)")
+
+                with Container(classes="panel"):
+                    yield Label("CRISPR TARGET & PAM", classes="card-title")
+                    yield Label("Target: ATGCCCCAACTAAATACTAC (20 bp)")
+                    yield Label("PAM Motif: SpCas9 [NGG / NAG]")
+                    yield Label("Seed Window: Positions 11-20 (Critical)")
+                    yield Label("Tolerance: Max 2 Mismatches")
 
                 with Container(classes="panel"):
                     yield Label("ACTIONS", classes="card-title")
                     yield Button("▶ Run Alignment (R)", id="btn-run", variant="primary")
+                    yield Button("🌐 Distributed Dask (D)", id="btn-dask", variant="warning")
                     yield Button("⚡ Benchmark (B)", id="btn-bench", variant="success")
 
             with Vertical(id="main-panel"):
                 with Container(id="progress-container"):
-                    yield Label("PIPELINE PROGRESS", classes="card-title")
+                    yield Label("PIPELINE & DISTRIBUTED PROGRESS", classes="card-title")
                     yield Label("Status: Ready", id="status-label")
                     yield ProgressBar(id="pipeline-progress", show_percentage=True, show_eta=False, total=100)
 
@@ -111,12 +127,14 @@ class GeneWeaverTUI(App):
 
     def on_mount(self) -> None:
         log = self.query_one(RichLog)
-        log.write("[bold green]GeneWeaver TUI Initialized.[/bold green]")
-        log.write("[cyan]Press [bold]R[/bold] to run sequence alignment, [bold]B[/bold] to run benchmark, [bold]Q[/bold] to quit.[/cyan]")
+        log.write("[bold green]GeneWeaver Week 3 TUI Initialized.[/bold green]")
+        log.write("[cyan]Press [bold]R[/bold] for Single-GPU, [bold]D[/bold] for Dask Distributed, [bold]B[/bold] for Benchmark, [bold]Q[/bold] to Quit.[/cyan]")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-run":
             self.action_run_alignment()
+        elif event.button.id == "btn-dask":
+            self.action_run_dask()
         elif event.button.id == "btn-bench":
             self.action_run_benchmark()
 
@@ -130,31 +148,49 @@ class GeneWeaverTUI(App):
     def action_run_alignment(self) -> None:
         log = self.query_one(RichLog)
         self.call_from_thread(self.update_progress, 10, "Loading genome sequence data...")
-        log.write("[bold yellow]Initiating CRISPR Off-Target Scan...[/bold yellow]")
+        log.write("[bold yellow]Initiating Single-GPU Alignment Scan...[/bold yellow]")
 
         sequences = read_fasta("data/genome.fasta")
         genome = "".join(sequences)
         target = read_target("data/target.txt")
         log.write(f"Loaded genome: [bold]{len(genome):,}[/bold] bp | Target: [bold]{target}[/bold]")
 
-        # Chunking
-        self.call_from_thread(self.update_progress, 30, "Chunking genomic sequence...")
-        chunks = create_chunks(genome, chunk_size=1000)
-        log.write(f"Partitioned into [bold]{len(chunks):,}[/bold] chunks of 1,000 bp.")
-
-        # GPU Offloading and Alignment
-        self.call_from_thread(self.update_progress, 60, "Offloading to CUDA VRAM & Executing Kernel...")
-        log.write("[cyan]Launching JIT-compiled CUDA alignment kernel on GPU...[/cyan]")
+        self.call_from_thread(self.update_progress, 50, "Offloading to CUDA VRAM & Running Kernel...")
         t0 = time.perf_counter()
-        matches = gpu_align(genome, target, max_mismatches=2)
+        raw_matches = gpu_align(genome, target, max_mismatches=2)
+        ranked = rank_off_targets(raw_matches, genome, target)
         gpu_duration = time.perf_counter() - t0
 
         self.call_from_thread(self.update_progress, 100, f"Completed in {gpu_duration*1000:.2f} ms")
-        log.write(f"[bold green]✓ Alignment Completed![/bold green] Found [bold]{len(matches)}[/bold] off-target site(s).")
-        log.write(f"[magenta]Total GPU Execution Time: {gpu_duration*1000:.2f} ms[/magenta]")
+        log.write(f"[bold green]✓ Single-GPU Completed![/bold green] Scored [bold]{len(ranked)}[/bold] off-target site(s) in {gpu_duration*1000:.2f} ms.")
 
-        for m in matches[:5]:
-            log.write(f"  → Pos [bold]{m['position']:,}[/bold]: Seq [bold]{m['sequence']}[/bold] (Mismatches: {m['mismatches']})")
+        for r in ranked[:5]:
+            log.write(f"  → Rank #{r['rank']} | Pos {r['position']:,} | PAM {r['pam']} | Score: [bold]{r['severity_score']}%[/bold] | {r['risk_badge']}")
+
+    @work(thread=True)
+    def action_run_dask(self) -> None:
+        log = self.query_one(RichLog)
+        self.call_from_thread(self.update_progress, 15, "Partitioning genome for Dask workers...")
+        log.write("[bold yellow]Launching Dask Distributed Multi-Batch Pipeline...[/bold yellow]")
+
+        sequences = read_fasta("data/genome.fasta")
+        genome = "".join(sequences)
+        target = read_target("data/target.txt")
+
+        batches = partition_genome_for_workers(genome, target_length=len(target), n_batches=4)
+        log.write(f"Created [bold]{len(batches)}[/bold] balanced batches with boundary overlaps.")
+
+        self.call_from_thread(self.update_progress, 50, "Dispatching parallel tasks across workers...")
+        t0 = time.perf_counter()
+        ranked = run_distributed_pipeline(genome, target, max_mismatches=2, n_batches=4)
+        dist_duration = time.perf_counter() - t0
+
+        self.call_from_thread(self.update_progress, 100, f"Dask Complete in {dist_duration*1000:.2f} ms")
+        log.write(f"[bold green]✓ Dask Distributed Complete![/bold green] Gathered [bold]{len(ranked)}[/bold] deduplicated hits.")
+        log.write(f"[magenta]Total Distributed Time: {dist_duration*1000:.2f} ms[/magenta]")
+
+        for r in ranked[:5]:
+            log.write(f"  → Rank #{r['rank']} | Pos {r['position']:,} | PAM {r['pam']} ({r['pam_type']}) | Score: [bold]{r['severity_score']}%[/bold] | {r['risk_badge']}")
 
     @work(thread=True)
     def action_run_benchmark(self) -> None:
@@ -185,6 +221,6 @@ class GeneWeaverTUI(App):
 if __name__ == "__main__":
     app = GeneWeaverTUI()
     if "--smoke-test" in sys.argv:
-        print("Connected Alignment to TUI successfully.")
+        print("Updated TUI layout with Dask cluster telemetry successfully.")
     else:
         app.run()

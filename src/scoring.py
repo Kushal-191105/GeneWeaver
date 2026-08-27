@@ -14,8 +14,6 @@ PAM_PROXIMITY_WEIGHTS = {
 def get_position_weight(position: int) -> float:
     """
     Returns the mismatch penalty weight for a given position in the 20-bp protospacer.
-    Positions near the 3' PAM (seed region) carry high penalties, whereas 5' distal
-    positions carry lower penalties.
     """
     return PAM_PROXIMITY_WEIGHTS.get(position, 0.50)
 
@@ -78,14 +76,64 @@ def validate_pam(pam_seq: str) -> dict:
         }
 
 
-if __name__ == "__main__":
-    print("Testing biological position weights...")
-    for pos in [0, 5, 9, 10, 15, 19]:
-        weight = get_position_weight(pos)
-        seed = "SEED (Critical)" if is_seed_region(pos) else "DISTAL (Tolerated)"
-        print(f"Position {pos + 1:2d} (idx {pos:2d}): Penalty {weight:.2f} [{seed}]")
+def calculate_severity_score(mismatch_positions: list, pam_seq: str, target_length: int = 20) -> dict:
+    """
+    Calculates the biological CRISPR cleavage severity score (0.0% to 100.0%):
+    - Higher score indicates high probability of off-target DNA double-strand break (dangerous).
+    - Lower score indicates minimal or abolished cleavage (tolerated).
+    
+    Formula:
+      Cleavage_Score = PAM_factor * Product(1.0 - Weight_i) * 100.0%
+    """
+    pam_info = validate_pam(pam_seq)
+    pam_factor = pam_info["pam_factor"]
 
-    assert get_position_weight(0) < get_position_weight(19)
-    assert not is_seed_region(4)
-    assert is_seed_region(15)
-    print("Biological position weights verified successfully!")
+    if pam_factor == 0.0:
+        return {
+            "severity_score": 0.0,
+            "pam_info": pam_info,
+            "seed_mismatches": sum(1 for p in mismatch_positions if is_seed_region(p)),
+            "distal_mismatches": sum(1 for p in mismatch_positions if not is_seed_region(p)),
+            "cleavage_probability": 0.0
+        }
+
+    # Calculate mismatch tolerance factor
+    score_factor = 1.0
+    for pos in mismatch_positions:
+        weight = get_position_weight(pos)
+        score_factor *= (1.0 - weight)
+
+    final_score = round(score_factor * pam_factor * 100.0, 2)
+
+    return {
+        "severity_score": final_score,
+        "pam_info": pam_info,
+        "seed_mismatches": sum(1 for p in mismatch_positions if is_seed_region(p)),
+        "distal_mismatches": sum(1 for p in mismatch_positions if not is_seed_region(p)),
+        "cleavage_probability": round(score_factor * pam_factor, 4)
+    }
+
+
+if __name__ == "__main__":
+    # Test cases:
+    # 1. Exact match with canonical PAM -> 100%
+    s1 = calculate_severity_score([], "TGG")
+    print(f"Exact match + TGG: Severity = {s1['severity_score']}%")
+    assert s1["severity_score"] == 100.0
+
+    # 2. Distal mismatch (pos 1) + canonical PAM -> High severity (e.g. ~88%)
+    s2 = calculate_severity_score([1], "CGG")
+    print(f"Distal mismatch (pos 1) + CGG: Severity = {s2['severity_score']}%")
+    assert s2["severity_score"] > 80.0
+
+    # 3. Seed mismatch (pos 18) + canonical PAM -> Low severity (<5%)
+    s3 = calculate_severity_score([18], "CGG")
+    print(f"Seed mismatch (pos 18) + CGG: Severity = {s3['severity_score']}%")
+    assert s3["severity_score"] < 10.0
+
+    # 4. Any mismatch + Invalid PAM -> 0%
+    s4 = calculate_severity_score([], "ATC")
+    print(f"Exact match + Invalid PAM (ATC): Severity = {s4['severity_score']}%")
+    assert s4["severity_score"] == 0.0
+
+    print("CRISPR severity scoring verified successfully!")

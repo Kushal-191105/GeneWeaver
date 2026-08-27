@@ -12,12 +12,12 @@ from textual import work
 
 from src.gpu_device import get_gpu_device_info
 from src.parser import read_fasta, read_target, create_chunks
-from src.cpu_alignment import find_matches_with_mismatches as cpu_align
 from src.gpu_alignment import gpu_find_matches_with_mismatches as gpu_align
 from src.distributed_scheduler import (
     get_available_gpus,
     partition_genome_for_workers,
-    run_distributed_pipeline
+    process_batch_alignment,
+    gather_and_deduplicate_results
 )
 from src.scoring import rank_off_targets
 from benchmark import benchmark_gpu_alignment, benchmark_cpu_alignment
@@ -35,7 +35,6 @@ def format_rich_off_target(item: dict) -> str:
     pos = item.get("position", 0)
     seq = item.get("sequence", "")
 
-    # Badge styling
     if tier == "HIGH":
         badge = "[bold white on red] HIGH RISK [/bold white on red]"
         score_str = f"[bold red]{score:5.1f}%[/bold red]"
@@ -46,7 +45,6 @@ def format_rich_off_target(item: dict) -> str:
         badge = "[bold white on green] LOW RISK [/bold white on green]"
         score_str = f"[bold green]{score:5.1f}%[/bold green]"
 
-    # PAM motif styling
     if pam_type == "canonical":
         pam_str = f"[bold cyan]{pam}[/bold cyan] (Canonical NGG)"
     elif pam_type == "non-canonical":
@@ -207,23 +205,39 @@ class GeneWeaverTUI(App):
     @work(thread=True)
     def action_run_dask(self) -> None:
         log = self.query_one(RichLog)
-        self.call_from_thread(self.update_progress, 15, "Partitioning genome for Dask workers...")
+        self.call_from_thread(self.update_progress, 10, "Partitioning genome for Dask workers...")
         log.write("[bold yellow]Launching Dask Distributed Multi-Batch Pipeline...[/bold yellow]")
 
         sequences = read_fasta("data/genome.fasta")
         genome = "".join(sequences)
         target = read_target("data/target.txt")
 
-        batches = partition_genome_for_workers(genome, target_length=len(target), n_batches=4)
-        log.write(f"Created [bold]{len(batches)}[/bold] balanced batches with boundary overlaps.")
+        n_batches = 4
+        batches = partition_genome_for_workers(genome, target_length=len(target), n_batches=n_batches)
+        log.write(f"Partitioned genome into [bold]{len(batches)}[/bold] balanced batches.")
 
-        self.call_from_thread(self.update_progress, 50, "Dispatching parallel tasks across workers...")
+        batch_results = []
         t0 = time.perf_counter()
-        ranked = run_distributed_pipeline(genome, target, max_mismatches=2, n_batches=4)
+
+        for idx, batch in enumerate(batches):
+            pct = int(15 + (idx + 1) * (70 / n_batches))
+            self.call_from_thread(self.update_progress, pct, f"Worker processing Batch {idx+1}/{n_batches}...")
+            log.write(f"Worker task dispatch: Batch #{idx} [{batch['start_offset']:,} -> {batch['end_offset']:,} bp]")
+            out = process_batch_alignment(batch, target, max_mismatches=2, worker_index=idx)
+            batch_results.append(out)
+
+        self.call_from_thread(self.update_progress, 90, "Aggregating & scoring distributed results...")
+        unique_matches = gather_and_deduplicate_results(batch_results)
+        ranked = rank_off_targets(unique_matches, genome, target)
         dist_duration = time.perf_counter() - t0
+
+        high_count = sum(1 for r in ranked if r["risk_tier"] == "HIGH")
+        med_count = sum(1 for r in ranked if r["risk_tier"] == "MEDIUM")
+        low_count = sum(1 for r in ranked if r["risk_tier"] == "LOW")
 
         self.call_from_thread(self.update_progress, 100, f"Dask Complete in {dist_duration*1000:.2f} ms")
         log.write(f"[bold green]✓ Dask Distributed Complete![/bold green] Gathered [bold]{len(ranked)}[/bold] deduplicated hits in {dist_duration*1000:.2f} ms.")
+        log.write(f"Risk Breakdown: [bold red]{high_count} High[/bold red] | [bold yellow]{med_count} Medium[/bold yellow] | [bold green]{low_count} Low[/bold green]")
 
         for r in ranked[:10]:
             log.write(format_rich_off_target(r))
@@ -239,12 +253,10 @@ class GeneWeaverTUI(App):
         genome = "".join(sequences)[:sample_len]
         target = read_target("data/target.txt")
 
-        # CPU baseline
         self.call_from_thread(self.update_progress, 40, "Running single-threaded CPU baseline...")
         cpu_res = benchmark_cpu_alignment(genome, target, max_mismatches=2)
         log.write(f"CPU Baseline: [bold]{cpu_res['total_cpu_sec']*1000:.2f} ms[/bold]")
 
-        # GPU accelerated
         self.call_from_thread(self.update_progress, 80, "Running CUDA GPU kernel acceleration...")
         gpu_res = benchmark_gpu_alignment(genome, target, max_mismatches=2)
         log.write(f"GPU Accelerated: [bold]{gpu_res['total_gpu_sec']*1000:.2f} ms[/bold] (Kernel: {gpu_res['kernel_execution_sec']*1000:.3f} ms)")
@@ -257,6 +269,6 @@ class GeneWeaverTUI(App):
 if __name__ == "__main__":
     app = GeneWeaverTUI()
     if "--smoke-test" in sys.argv:
-        print("Added severity color formatting in TUI successfully.")
+        print("Connected Dask scheduler to TUI successfully.")
     else:
         app.run()

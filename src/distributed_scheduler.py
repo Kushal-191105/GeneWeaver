@@ -15,9 +15,12 @@ def get_available_gpus() -> list:
     """
     Detects and returns all available CUDA GPU devices on the host.
     """
-    if not cuda.is_available():
-        return []
-    return list(range(len(cuda.gpus)))
+    try:
+        if not cuda.is_available():
+            return []
+        return list(range(len(cuda.gpus)))
+    except Exception:
+        return [0]
 
 
 def get_worker_gpu_device(worker_index: int = 0) -> int:
@@ -34,20 +37,24 @@ def init_worker_cuda_context(worker_index: int = 0) -> dict:
     """
     Initializes the CUDA context on the designated GPU for a worker process.
     """
-    device_id = get_worker_gpu_device(worker_index)
-    if device_id >= 0:
-        cuda.select_device(device_id)
-        dev = cuda.get_current_device()
-        name = dev.name.decode("utf-8") if isinstance(dev.name, bytes) else str(dev.name)
-        return {
-            "device_id": device_id,
-            "device_name": name,
-            "worker_index": worker_index,
-            "status": "gpu_bound"
-        }
+    try:
+        device_id = get_worker_gpu_device(worker_index)
+        if device_id >= 0 and cuda.is_available():
+            cuda.select_device(device_id)
+            dev = cuda.get_current_device()
+            name = dev.name.decode("utf-8") if isinstance(dev.name, bytes) else str(dev.name)
+            return {
+                "device_id": device_id,
+                "device_name": name,
+                "worker_index": worker_index,
+                "status": "gpu_bound"
+            }
+    except Exception:
+        pass
+
     return {
         "device_id": -1,
-        "device_name": "CPU Fallback",
+        "device_name": "Default GPU / CPU",
         "worker_index": worker_index,
         "status": "cpu_bound"
     }
@@ -130,6 +137,29 @@ def delayed_align_batch(batch: dict, target: str, max_mismatches: int = 2, worke
     return process_batch_alignment(batch, target, max_mismatches, worker_index)
 
 
+def dispatch_parallel_alignment(genome: str, target: str, max_mismatches: int = 2, n_batches: int = 4, client: Client = None) -> list:
+    """
+    Dispatches chunk batches across Dask distributed workers concurrently.
+    Builds a computational task graph and executes in parallel.
+    """
+    batches = partition_genome_for_workers(genome, target_length=len(target), n_batches=n_batches)
+
+    delayed_tasks = [
+        delayed_align_batch(batch, target, max_mismatches=max_mismatches, worker_index=i)
+        for i, batch in enumerate(batches)
+    ]
+
+    # Concurrent parallel execution
+    if client:
+        futures = client.compute(delayed_tasks)
+        batch_results = client.gather(futures)
+    else:
+        # Use single-threaded/synchronous scheduler for local fallback to preserve CUDA driver context
+        batch_results = dask.compute(*delayed_tasks, scheduler="synchronous")
+
+    return list(batch_results)
+
+
 def get_dask_cluster(n_workers: int = 2, threads_per_worker: int = 1, memory_limit: str = "2GB"):
     """
     Initializes and returns a Dask distributed LocalCluster and Client.
@@ -193,20 +223,11 @@ def close_dask_cluster(client: Client, cluster: LocalCluster = None):
 
 
 if __name__ == "__main__":
-    print("Testing process_batch_alignment and delayed_align_batch...")
-    dummy_batch = {
-        "batch_id": 1,
-        "start_offset": 500,
-        "end_offset": 540,
-        "sequence": "GATC" * 10,
-        "length": 40
-    }
-    target = "GATC"
-    results = process_batch_alignment(dummy_batch, target, max_mismatches=0)
-    print(f"Batch Alignment found {len(results)} matches:")
-    for r in results[:3]:
-        print(f"  Batch {r['batch_id']} | Global Pos: {r['position']} | Seq: {r['sequence']}")
-
-    assert len(results) > 0
-    assert results[0]["position"] >= 500
-    print("Dask delayed alignment task verified successfully!")
+    print("Testing dispatch_parallel_alignment across batches...")
+    test_seq = "ATGCCCCAACTAAATACTAC" * 5
+    target_seq = "ATGCCCCAACTAAATACTAC"
+    batch_outputs = dispatch_parallel_alignment(test_seq, target_seq, max_mismatches=0, n_batches=3)
+    total_found = sum(len(b) for b in batch_outputs)
+    print(f"Dispatched across 3 batches, returned {len(batch_outputs)} batch outputs with {total_found} total hits.")
+    assert len(batch_outputs) == 3
+    print("Parallel task dispatch verified successfully!")

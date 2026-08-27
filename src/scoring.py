@@ -142,13 +142,59 @@ def calculate_severity_score(mismatch_positions: list, pam_seq: str, target_leng
     }
 
 
-if __name__ == "__main__":
-    test_scores = [95.0, 75.0, 45.0, 15.0, 0.0]
-    for s in test_scores:
-        r = categorize_risk(s)
-        print(f"Score {s:5.1f}% -> {r['badge']} ({r['tier']}): {r['recommendation']}")
+def rank_off_targets(matches: list, genome: str, target: str) -> list:
+    """
+    Enriches alignment matches with biological PAM extraction, severity scoring,
+    risk categorization, and ranks them in descending order of cleavage severity.
+    """
+    target_len = len(target)
+    scored_matches = []
 
-    assert categorize_risk(85.0)["tier"] == "HIGH"
-    assert categorize_risk(35.0)["tier"] == "MEDIUM"
-    assert categorize_risk(5.0)["tier"] == "LOW"
-    print("Mutation risk categorization verified successfully!")
+    for match in matches:
+        pos = match["position"]
+        mismatch_positions = match.get("mismatch_positions", [])
+
+        # Extract and score PAM
+        pam_seq = extract_pam(genome, pos, target_len)
+        score_data = calculate_severity_score(mismatch_positions, pam_seq, target_len)
+
+        entry = dict(match)
+        entry["pam"] = pam_seq
+        entry["pam_type"] = score_data["pam_info"]["type"]
+        entry["severity_score"] = score_data["severity_score"]
+        entry["risk_tier"] = score_data["risk"]["tier"]
+        entry["risk_badge"] = score_data["risk"]["badge"]
+        entry["risk_color"] = score_data["risk"]["color"]
+        entry["seed_mismatches"] = score_data["seed_mismatches"]
+        entry["distal_mismatches"] = score_data["distal_mismatches"]
+        entry["cleavage_prob"] = score_data["cleavage_probability"]
+        entry["recommendation"] = score_data["risk"]["recommendation"]
+
+        scored_matches.append(entry)
+
+    # Sort descending by severity score, secondarily by position ascending
+    scored_matches.sort(key=lambda x: (-x["severity_score"], x["position"]))
+
+    # Assign sequential biological rank
+    for rank_idx, item in enumerate(scored_matches, start=1):
+        item["rank"] = rank_idx
+
+    return scored_matches
+
+
+if __name__ == "__main__":
+    # Test off-target ranking
+    dummy_genome = "ATGCCCCAACTAAATACTAC" + "TGG" + "GATC" * 10
+    target_seq = "ATGCCCCAACTAAATACTAC"
+    raw_matches = [
+        {"position": 0, "sequence": "ATGCCCCAACTAAATACTAC", "mismatches": 0, "mismatch_positions": []},
+        {"position": 24, "sequence": "GATCGATCGATCGATCGATC", "mismatches": 2, "mismatch_positions": [18, 19]},
+    ]
+    ranked = rank_off_targets(raw_matches, dummy_genome, target_seq)
+    print(f"Ranked {len(ranked)} off-target candidates:")
+    for r in ranked:
+        print(f"Rank #{r['rank']} | Pos: {r['position']} | Score: {r['severity_score']}% | Risk: {r['risk_badge']} | PAM: {r['pam']}")
+
+    assert ranked[0]["rank"] == 1
+    assert ranked[0]["severity_score"] >= ranked[1]["severity_score"]
+    print("Off-target ranking verified successfully!")

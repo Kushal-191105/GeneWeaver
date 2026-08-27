@@ -6,17 +6,26 @@ from src.cpu_alignment import find_matches_with_mismatches as cpu_align
 from src.gpu_alignment import gpu_find_matches_with_mismatches as gpu_align
 from src.gpu_device import print_gpu_device_info
 from src.validator import validate_alignment_results
-from benchmark import benchmark_cpu_alignment, benchmark_gpu_alignment
+from src.distributed_scheduler import (
+    get_available_gpus,
+    partition_genome_for_workers,
+    run_distributed_pipeline
+)
+from src.scoring import rank_off_targets
+from benchmark import benchmark_cpu_alignment, benchmark_gpu_alignment, benchmark_distributed_scaling
 
 
 def run_pipeline():
-    print("=" * 60)
-    print("   GeneWeaver: GPU-Accelerated CRISPR Alignment Engine   ")
-    print("=" * 60)
+    print("=" * 70)
+    print("      GeneWeaver: GPU-Accelerated CRISPR Alignment Engine      ")
+    print("      Week 3: Distributed Dask Scaling & Biological Scoring     ")
+    print("=" * 70)
 
     # 1. Hardware Detection
-    print("\n--- 1. Hardware Inspection ---")
+    print("\n--- 1. Hardware & Distributed Infrastructure ---")
     print_gpu_device_info()
+    gpus = get_available_gpus()
+    print(f"Dask Multi-GPU Scheduler: {len(gpus)} GPU(s) available for worker affinity.")
 
     # 2. Sequence Analysis & Ingestion
     print("\n--- 2. Genomic Dataset Ingestion & Validation ---")
@@ -44,7 +53,7 @@ def run_pipeline():
     print(f"Average Sequence Length: {round(data['length'].mean(), 2)} bp")
 
     # 3. FASTA Loading & Chunking
-    print("\n--- 3. Genome Chunking ---")
+    print("\n--- 3. Genome Ingestion & Chunking ---")
     sequences = read_fasta("data/genome.fasta")
     genome = "".join(sequences)
     chunk_size = 1000
@@ -53,16 +62,20 @@ def run_pipeline():
     print(f"Chunk Size: {chunk_size} bp | Number of Chunks: {len(chunks):,}")
 
     # 4. Target Configuration
-    print("\n--- 4. CRISPR Target Sequence ---")
+    print("\n--- 4. CRISPR Target & Biological Motif Configuration ---")
     target = read_target("data/target.txt")
-    print(f"Target: {target} (Length: {len(target)} bp)")
+    print(f"Target Sequence: {target} (Length: {len(target)} bp)")
+    print("Endonuclease:    SpCas9")
+    print("PAM Motif:       5'-NGG-3' (Canonical), 5'-NAG-3' (Non-canonical)")
+    print("Seed Window:     Positions 11 to 20 (Proximal to PAM, High Penalty)")
     max_mismatches = 2
 
-    # 5. Parity Validation on 50k bp sample
-    print("\n--- 5. CPU vs GPU Parity Validation ---")
-    validate_alignment_results(genome[:50000], target, max_mismatches=max_mismatches)
+    # 5. Parity Validation (3-Way: CPU vs Single-GPU vs Dask Distributed)
+    print("\n--- 5. 3-Way Parity Validation (CPU vs GPU vs Dask) ---")
+    sample_val = genome[:50000]
+    validate_alignment_results(sample_val, target, max_mismatches=max_mismatches, test_distributed=True)
 
-    # 6. Benchmark on 200k bp sample
+    # 6. Benchmark Comparison
     sample_len = 200000
     print(f"\n--- 6. Comparative Benchmark ({sample_len:,} bp) ---")
     sample_genome = genome[:sample_len]
@@ -87,18 +100,29 @@ def run_pipeline():
     print(f"CUDA Kernel Speedup    : {kernel_speedup:.2f}x faster")
     print("=" * 65)
 
-    # 7. Full Genome GPU Alignment
-    print("\n--- 7. Full Genome GPU Alignment (5.5M bp) ---")
+    # 7. Distributed Full Genome Alignment & Biological Scoring
+    print("\n--- 7. Dask Distributed Full Genome Alignment (5.53M bp) ---")
     t0 = time.perf_counter()
-    full_matches = gpu_align(genome, target, max_mismatches=max_mismatches)
-    full_gpu_time = time.perf_counter() - t0
+    ranked_off_targets = run_distributed_pipeline(genome, target, max_mismatches=max_mismatches, n_batches=4)
+    dist_time = time.perf_counter() - t0
 
-    print(f"Full Genome Alignment Completed in: {full_gpu_time*1000:.2f} ms ({full_gpu_time:.4f} s)")
-    print(f"Total Off-Target Matches Identified: {len(full_matches)}")
-    for m in full_matches[:10]:
-        print(f"  Pos {m['position']:,} | Seq: {m['sequence']} | Mismatches: {m['mismatches']}")
+    print(f"Distributed Alignment Completed in: {dist_time*1000:.2f} ms ({dist_time:.4f} s)")
+    print(f"Total Candidate Off-Target Sites Identified: {len(ranked_off_targets)}")
 
-    print("\n[SUCCESS] Week 2 Pipeline Integration Verified!")
+    high_risk = [r for r in ranked_off_targets if r["risk_tier"] == "HIGH"]
+    med_risk = [r for r in ranked_off_targets if r["risk_tier"] == "MEDIUM"]
+    low_risk = [r for r in ranked_off_targets if r["risk_tier"] == "LOW"]
+
+    print(f"Risk Stratification: {len(high_risk)} High Risk | {len(med_risk)} Medium Risk | {len(low_risk)} Low Risk")
+
+    print("\n" + "-" * 85)
+    print(f"{'Rank':<5} | {'Pos':<9} | {'Sequence':<22} | {'PAM':<5} | {'Type':<12} | {'Score':<8} | {'Risk':<12}")
+    print("-" * 85)
+    for r in ranked_off_targets[:10]:
+        print(f"#{r['rank']:<4} | {r['position']:<9} | {r['sequence']:<22} | {r['pam']:<5} | {r['pam_type']:<12} | {r['severity_score']:<7.1f}% | {r['risk_badge']:<12}")
+    print("-" * 85)
+
+    print("\n[SUCCESS] Week 3 Pipeline Integration Verified!")
 
 
 if __name__ == "__main__":

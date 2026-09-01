@@ -86,18 +86,37 @@ def cuda_mismatch_count_kernel(genome, target, mismatch_counts, total_positions,
 
 
 @cuda.jit
-def cuda_shared_target_buffer_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches):
+def cuda_shared_target_mismatch_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches):
     """
-    CUDA Kernel with on-chip Shared Memory target buffer:
-    Allocates ultra-low latency shared SRAM for the 20-30 bp CRISPR target sequence.
+    CUDA Kernel: Uses on-chip Shared Memory for the target sequence with cooperative loading.
+    All threads in each block collaborate to load the 20-bp target into SRAM once,
+    then perform comparisons with ultra-low latency.
     """
     # 1. Allocate on-chip CUDA Shared Memory (SRAM) for target sequence (capacity 32 bytes)
     s_target = cuda.shared.array(32, dtype=uint8)
 
+    # 2. Collaborative target load by threads 0..target_len-1 within the thread block
+    tid = cuda.threadIdx.x
+    if tid < target_len:
+        s_target[tid] = target[tid]
+
+    # 3. Synchronize all threads in the block to ensure shared target memory is fully populated
+    cuda.syncthreads()
+
+    # 4. Global genomic window evaluation using on-chip s_target
     pos = cuda.grid(1)
     if pos < total_positions:
-        # Placeholder for kernel execution
-        pass
+        mismatches = 0
+        for i in range(target_len):
+            if genome[pos + i] != s_target[i]:
+                mismatches += 1
+                if mismatches > max_mismatches:
+                    break
+
+        if mismatches <= max_mismatches:
+            mismatch_counts[pos] = mismatches
+        else:
+            mismatch_counts[pos] = 255
 
 
 def gpu_exact_match(genome: str, target: str, threads_per_block: int = 256):
@@ -149,12 +168,36 @@ def gpu_count_mismatches(genome: str, target: str, max_mismatches: int = 2, thre
     return d_mismatch_counts.copy_to_host()
 
 
+def gpu_count_mismatches_shared_target(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
+    """
+    Executes shared-memory optimized mismatch counting on GPU.
+    """
+    genome_len = len(genome)
+    target_len = len(target)
+    total_positions = genome_len - target_len + 1
+
+    if total_positions <= 0:
+        return np.array([], dtype=np.uint8)
+
+    d_genome, _ = transfer_genome_to_gpu(genome)
+    d_target, _ = transfer_target_to_gpu(target)
+    d_mismatch_counts = cuda.device_array(total_positions, dtype=np.uint8)
+
+    blocks_per_grid = math.ceil(total_positions / threads_per_block)
+    cuda_shared_target_mismatch_kernel[blocks_per_grid, threads_per_block](
+        d_genome, d_target, d_mismatch_counts, total_positions, target_len, max_mismatches
+    )
+    cuda.synchronize()
+
+    return d_mismatch_counts.copy_to_host()
+
+
 def gpu_find_matches_with_mismatches(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
     Orchestrates GPU alignment and collects structured results.
     """
     target_len = len(target)
-    mismatch_array = gpu_count_mismatches(genome, target, max_mismatches=max_mismatches, threads_per_block=threads_per_block)
+    mismatch_array = gpu_count_mismatches_shared_target(genome, target, max_mismatches=max_mismatches, threads_per_block=threads_per_block)
 
     valid_positions = np.where(mismatch_array <= max_mismatches)[0]
     matches = []
@@ -176,4 +219,11 @@ def gpu_find_matches_with_mismatches(genome: str, target: str, max_mismatches: i
 
 
 if __name__ == "__main__":
-    print("CUDA Shared Memory Target Buffer defined successfully.")
+    test_genome = "ATGCGATCGATCGATCGATC"
+    test_target = "GATC"
+    res = gpu_find_matches_with_mismatches(test_genome, test_target, max_mismatches=1)
+    print(f"Cooperative Target Shared Memory Kernel found {len(res)} matches:")
+    for r in res:
+        print(f"  Pos: {r['position']} | Seq: {r['sequence']} | Mismatches: {r['mismatches']}")
+    assert len(res) > 0
+    print("Cooperative target loading verified successfully!")

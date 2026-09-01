@@ -8,8 +8,14 @@ from src.gpu_alignment import (
     transfer_target_to_gpu,
     cuda_mismatch_count_kernel,
     cuda_shared_mem_alignment_kernel,
+    gpu_count_mismatches_global,
+    gpu_count_mismatches_shared_mem
 )
-from src.distributed_scheduler import dispatch_parallel_alignment, gather_and_deduplicate_results
+from src.distributed_scheduler import (
+    dispatch_parallel_alignment,
+    gather_and_deduplicate_results,
+    run_distributed_pipeline
+)
 from numba import cuda
 
 
@@ -75,7 +81,6 @@ def benchmark_block_dimensions(genome: str, target: str, block_sizes: list = Non
     total_positions = genome_len - target_len + 1
     d_out = cuda.device_array(total_positions, dtype=np.uint8)
 
-    # Warmup
     cuda_shared_mem_alignment_kernel[math.ceil(total_positions / 256), 256](
         d_genome, d_target, d_out, total_positions, target_len, max_mismatches, genome_len
     )
@@ -223,6 +228,45 @@ def benchmark_distributed_scaling(genome: str, target: str, max_mismatches: int 
     return results
 
 
+def run_full_system_benchmark():
+    """
+    Comprehensive full-genome (5.53M bp) benchmark audit:
+    Evaluates Single-GPU Global Memory vs Shared Memory vs Dask Distributed.
+    """
+    print("\n" + "=" * 75)
+    print("      GeneWeaver: Full-Genome Comprehensive System Benchmark      ")
+    print("=" * 75)
+
+    sequences = read_fasta("data/genome.fasta")
+    genome = "".join(sequences)
+    target = read_target("data/target.txt")
+
+    print(f"Full Genome Length: {len(genome):,} bp | Target: {target} (len: {len(target)})")
+
+    # 1. Global Memory Single GPU Run
+    t0 = time.perf_counter()
+    res_global = gpu_count_mismatches_global(genome, target, max_mismatches=2)
+    time_global = (time.perf_counter() - t0) * 1000
+
+    # 2. Shared Memory Single GPU Run
+    t1 = time.perf_counter()
+    res_shared = gpu_count_mismatches_shared_mem(genome, target, max_mismatches=2)
+    time_shared = (time.perf_counter() - t1) * 1000
+
+    # 3. Dask Distributed 4-Batch Run
+    t2 = time.perf_counter()
+    dist_results = run_distributed_pipeline(genome, target, max_mismatches=2, n_batches=4)
+    time_dask = (time.perf_counter() - t2) * 1000
+
+    print("\n" + "-" * 75)
+    print(f"{'Architecture / Pipeline':<30} | {'Time (ms)':<12} | {'Throughput (Mbp/s)':<20}")
+    print("-" * 75)
+    print(f"{'Single-GPU (Global VRAM)':<30} | {time_global:<12.2f} | {(len(genome)/1e6)/(time_global/1000):<20.2f}")
+    print(f"{'Single-GPU (Shared Memory SRAM)':<30} | {time_shared:<12.2f} | {(len(genome)/1e6)/(time_shared/1000):<20.2f}")
+    print(f"{'Dask Distributed (4 Batches)':<30} | {time_dask:<12.2f} | {(len(genome)/1e6)/(time_dask/1000):<20.2f}")
+    print("-" * 75 + "\n")
+
+
 def compare_cpu_vs_gpu(sample_length: int = 200000):
     """
     Performs head-to-head performance audit between CPU and GPU alignment engines.
@@ -271,3 +315,4 @@ if __name__ == "__main__":
     benchmark_shared_vs_global_memory(g, t, max_mismatches=2, iterations=5)
     benchmark_block_dimensions(g, t, block_sizes=[64, 128, 256, 512])
     benchmark_distributed_scaling(g, t, max_mismatches=2, batch_counts=[1, 2, 4])
+    run_full_system_benchmark()

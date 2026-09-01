@@ -86,42 +86,14 @@ def cuda_mismatch_count_kernel(genome, target, mismatch_counts, total_positions,
 
 
 @cuda.jit
-def cuda_shared_target_mismatch_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches):
+def cuda_shared_mem_alignment_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches, genome_len):
     """
-    CUDA Kernel: Uses on-chip Shared Memory for the target sequence with cooperative loading.
+    Optimized CUDA Kernel: Dual Shared Memory Architecture (Target Buffer + Genomic Tile Cache).
+    - Cooperative loading of target sequence into on-chip SRAM (s_target).
+    - Cooperative loading of genomic block window + halo into on-chip SRAM (s_genome).
+    - Block barrier cuda.syncthreads() ensures SRAM data integrity.
+    - Zero global memory access during the 20-bp sliding window comparisons.
     """
-    s_target = cuda.shared.array(32, dtype=uint8)
-
-    tid = cuda.threadIdx.x
-    if tid < target_len:
-        s_target[tid] = target[tid]
-
-    cuda.syncthreads()
-
-    pos = cuda.grid(1)
-    if pos < total_positions:
-        mismatches = 0
-        for i in range(target_len):
-            if genome[pos + i] != s_target[i]:
-                mismatches += 1
-                if mismatches > max_mismatches:
-                    break
-
-        if mismatches <= max_mismatches:
-            mismatch_counts[pos] = mismatches
-        else:
-            mismatch_counts[pos] = 255
-
-
-@cuda.jit
-def cuda_cooperative_tile_loading_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches, genome_len):
-    """
-    CUDA Kernel: Cooperative Loading of both Target and Genomic Window Tile into On-Chip SRAM.
-    1. Threads cooperatively load target sequence into s_target.
-    2. Threads cooperatively load genomic window + halo boundary into s_genome.
-    3. Block barrier cuda.syncthreads() ensures SRAM data validity before execution.
-    """
-    # 1. Shared Memory Allocations (Target: 32 bytes, Tile: 320 bytes)
     s_target = cuda.shared.array(32, dtype=uint8)
     s_genome = cuda.shared.array(320, dtype=uint8)
 
@@ -129,18 +101,18 @@ def cuda_cooperative_tile_loading_kernel(genome, target, mismatch_counts, total_
     bdim = cuda.blockDim.x
     block_start = cuda.blockIdx.x * bdim
 
-    # 2. Collaborative target load
+    # 1. Cooperative Target Load
     if tid < target_len:
         s_target[tid] = target[tid]
 
-    # 3. Collaborative main tile load
+    # 2. Cooperative Main Tile Load
     global_idx = block_start + tid
     if global_idx < genome_len:
         s_genome[tid] = genome[global_idx]
     else:
         s_genome[tid] = 0
 
-    # 4. Collaborative halo / boundary load for the sliding window
+    # 3. Cooperative Halo Boundary Load
     halo_len = target_len - 1
     if tid < halo_len:
         halo_global_idx = block_start + bdim + tid
@@ -149,8 +121,23 @@ def cuda_cooperative_tile_loading_kernel(genome, target, mismatch_counts, total_
         else:
             s_genome[bdim + tid] = 0
 
-    # 5. Barrier Synchronization
+    # 4. Synchronization Barrier
     cuda.syncthreads()
+
+    # 5. Ultra-Fast SRAM Sliding Window Comparison
+    pos = block_start + tid
+    if pos < total_positions:
+        mismatches = 0
+        for i in range(target_len):
+            if s_genome[tid + i] != s_target[i]:
+                mismatches += 1
+                if mismatches > max_mismatches:
+                    break
+
+        if mismatches <= max_mismatches:
+            mismatch_counts[pos] = mismatches
+        else:
+            mismatch_counts[pos] = 255
 
 
 def gpu_exact_match(genome: str, target: str, threads_per_block: int = 256):
@@ -178,9 +165,9 @@ def gpu_exact_match(genome: str, target: str, threads_per_block: int = 256):
     return np.where(h_match_flags == 1)[0].tolist()
 
 
-def gpu_count_mismatches(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
+def gpu_count_mismatches_global(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
-    Executes parallel mismatch counting across the genome on GPU.
+    Executes baseline global-memory mismatch counting on GPU.
     """
     genome_len = len(genome)
     target_len = len(target)
@@ -202,9 +189,9 @@ def gpu_count_mismatches(genome: str, target: str, max_mismatches: int = 2, thre
     return d_mismatch_counts.copy_to_host()
 
 
-def gpu_count_mismatches_shared_target(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
+def gpu_count_mismatches_shared_mem(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
-    Executes shared-memory optimized mismatch counting on GPU.
+    Executes dual shared-memory optimized mismatch counting on GPU.
     """
     genome_len = len(genome)
     target_len = len(target)
@@ -218,8 +205,8 @@ def gpu_count_mismatches_shared_target(genome: str, target: str, max_mismatches:
     d_mismatch_counts = cuda.device_array(total_positions, dtype=np.uint8)
 
     blocks_per_grid = math.ceil(total_positions / threads_per_block)
-    cuda_shared_target_mismatch_kernel[blocks_per_grid, threads_per_block](
-        d_genome, d_target, d_mismatch_counts, total_positions, target_len, max_mismatches
+    cuda_shared_mem_alignment_kernel[blocks_per_grid, threads_per_block](
+        d_genome, d_target, d_mismatch_counts, total_positions, target_len, max_mismatches, genome_len
     )
     cuda.synchronize()
 
@@ -228,10 +215,10 @@ def gpu_count_mismatches_shared_target(genome: str, target: str, max_mismatches:
 
 def gpu_find_matches_with_mismatches(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
-    Orchestrates GPU alignment and collects structured results.
+    Orchestrates GPU alignment using on-chip Shared Memory and collects structured results.
     """
     target_len = len(target)
-    mismatch_array = gpu_count_mismatches_shared_target(genome, target, max_mismatches=max_mismatches, threads_per_block=threads_per_block)
+    mismatch_array = gpu_count_mismatches_shared_mem(genome, target, max_mismatches=max_mismatches, threads_per_block=threads_per_block)
 
     valid_positions = np.where(mismatch_array <= max_mismatches)[0]
     matches = []
@@ -253,4 +240,11 @@ def gpu_find_matches_with_mismatches(genome: str, target: str, max_mismatches: i
 
 
 if __name__ == "__main__":
-    print("Cooperative Tile Loading with Halo Boundary defined successfully.")
+    test_genome = "ATGCCCCAACTAAATACTAC" + "TGG" + "GATC" * 50
+    test_target = "ATGCCCCAACTAAATACTAC"
+    res = gpu_find_matches_with_mismatches(test_genome, test_target, max_mismatches=2)
+    print(f"Shared Memory Kernel found {len(res)} matches:")
+    for r in res:
+        print(f"  Pos: {r['position']} | Seq: {r['sequence']} | Mismatches: {r['mismatches']}")
+    assert len(res) > 0
+    print("CUDA Shared Memory Mismatch Kernel verified successfully!")

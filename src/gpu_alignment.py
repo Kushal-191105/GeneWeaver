@@ -114,20 +114,42 @@ def cuda_shared_target_mismatch_kernel(genome, target, mismatch_counts, total_po
 
 
 @cuda.jit
-def cuda_shared_tile_mismatch_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches, genome_len):
+def cuda_cooperative_tile_loading_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches, genome_len):
     """
-    CUDA Kernel: Dual Shared Memory Architecture (Target Buffer + Genomic Window Tile Cache).
-    Allocates on-chip SRAM for both the target sequence and block-level genomic segment.
+    CUDA Kernel: Cooperative Loading of both Target and Genomic Window Tile into On-Chip SRAM.
+    1. Threads cooperatively load target sequence into s_target.
+    2. Threads cooperatively load genomic window + halo boundary into s_genome.
+    3. Block barrier cuda.syncthreads() ensures SRAM data validity before execution.
     """
-    # 1. Target SRAM buffer (32 bytes)
+    # 1. Shared Memory Allocations (Target: 32 bytes, Tile: 320 bytes)
     s_target = cuda.shared.array(32, dtype=uint8)
-    # 2. Genomic window tile cache (320 bytes: 256 threads + 64 bp halo)
     s_genome = cuda.shared.array(320, dtype=uint8)
 
     tid = cuda.threadIdx.x
+    bdim = cuda.blockDim.x
+    block_start = cuda.blockIdx.x * bdim
+
+    # 2. Collaborative target load
     if tid < target_len:
         s_target[tid] = target[tid]
 
+    # 3. Collaborative main tile load
+    global_idx = block_start + tid
+    if global_idx < genome_len:
+        s_genome[tid] = genome[global_idx]
+    else:
+        s_genome[tid] = 0
+
+    # 4. Collaborative halo / boundary load for the sliding window
+    halo_len = target_len - 1
+    if tid < halo_len:
+        halo_global_idx = block_start + bdim + tid
+        if halo_global_idx < genome_len:
+            s_genome[bdim + tid] = genome[halo_global_idx]
+        else:
+            s_genome[bdim + tid] = 0
+
+    # 5. Barrier Synchronization
     cuda.syncthreads()
 
 
@@ -231,4 +253,4 @@ def gpu_find_matches_with_mismatches(genome: str, target: str, max_mismatches: i
 
 
 if __name__ == "__main__":
-    print("CUDA Shared Memory Genome Tile Cache defined successfully.")
+    print("Cooperative Tile Loading with Halo Boundary defined successfully.")

@@ -108,7 +108,7 @@ def process_batch_alignment(batch: dict, target: str, max_mismatches: int = 2, w
     """
     Core worker execution routine:
     1. Sets up GPU context for the worker.
-    2. Runs high-throughput CUDA alignment on the batch slice.
+    2. Runs high-throughput CUDA Shared Memory (SRAM) alignment on the batch slice.
     3. Remaps local batch coordinates to absolute global genome positions.
     """
     init_worker_cuda_context(worker_index)

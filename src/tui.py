@@ -146,7 +146,7 @@ class GeneWeaverTUI(App):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        table.add_columns("Rank", "Genomic Pos", "Visual Sequence", "PAM", "PAM Type", "Score", "Risk Tier")
+        table.add_columns("Rank", "Genomic Pos", "Visual Sequence", "PAM", "PAM Motif Type", "Score", "Risk Level")
         table.cursor_type = "row"
 
         log = self.query_one(RichLog)
@@ -172,14 +172,39 @@ class GeneWeaverTUI(App):
         table.clear()
         for r in ranked_results:
             vis = format_visual_alignment(target, r["sequence"], r["pam"], r.get("mismatch_positions"))
+
+            # PAM formatting
+            p_type = r.get("pam_type", "invalid")
+            if p_type == "canonical":
+                pam_badge = f"[bold cyan]{r['pam']}[/bold cyan]"
+                type_badge = "[cyan]Canonical NGG (1.0x)[/cyan]"
+            elif p_type == "non-canonical":
+                pam_badge = f"[yellow]{r['pam']}[/yellow]"
+                type_badge = "[yellow]Non-canonical NAG (0.25x)[/yellow]"
+            else:
+                pam_badge = f"[dim red]{r['pam']}[/dim red]"
+                type_badge = "[dim red]Non-viable (0.0x)[/dim red]"
+
+            # Risk tier formatting
+            tier = r.get("risk_tier", "LOW")
+            if tier == "HIGH":
+                risk_badge = "[bold white on red] HIGH RISK [/bold white on red]"
+                score_str = f"[bold red]{r['severity_score']:.1f}%[/bold red]"
+            elif tier == "MEDIUM":
+                risk_badge = "[bold black on yellow] MED RISK [/bold black on yellow]"
+                score_str = f"[bold yellow]{r['severity_score']:.1f}%[/bold yellow]"
+            else:
+                risk_badge = "[bold white on green] LOW RISK [/bold white on green]"
+                score_str = f"[bold green]{r['severity_score']:.1f}%[/bold green]"
+
             table.add_row(
                 f"#{r['rank']}",
                 f"{r['position']:,}",
                 vis["match_display"],
-                r['pam'],
-                r['pam_type'].upper(),
-                f"{r['severity_score']:.1f}%",
-                r['risk_tier']
+                pam_badge,
+                type_badge,
+                score_str,
+                risk_badge
             )
 
     @work(thread=True)
@@ -271,6 +296,6 @@ class GeneWeaverTUI(App):
 if __name__ == "__main__":
     app = GeneWeaverTUI()
     if "--smoke-test" in sys.argv:
-        print("Embedded visual mismatch display in TUI successfully.")
+        print("Added PAM visualization in TUI table successfully.")
     else:
         app.run()

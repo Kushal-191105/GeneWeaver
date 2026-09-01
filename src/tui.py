@@ -20,7 +20,12 @@ from src.distributed_scheduler import (
     gather_and_deduplicate_results
 )
 from src.scoring import rank_off_targets
-from src.visualizer import format_visual_alignment, generate_alignment_track, format_off_target_summary_card
+from src.visualizer import (
+    format_visual_alignment,
+    generate_alignment_track,
+    describe_mutations,
+    format_off_target_summary_card
+)
 from benchmark import benchmark_gpu_alignment, benchmark_cpu_alignment
 
 
@@ -141,7 +146,7 @@ class GeneWeaverTUI(App):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        table.add_columns("Rank", "Genomic Pos", "Sequence", "PAM", "PAM Type", "Score", "Risk Tier")
+        table.add_columns("Rank", "Genomic Pos", "Visual Sequence", "PAM", "PAM Type", "Score", "Risk Tier")
         table.cursor_type = "row"
 
         log = self.query_one(RichLog)
@@ -162,14 +167,15 @@ class GeneWeaverTUI(App):
         p_bar.progress = progress
         s_lbl.update(f"Status: {status_text}")
 
-    def populate_table(self, ranked_results: list) -> None:
+    def populate_table(self, ranked_results: list, target: str) -> None:
         table = self.query_one(DataTable)
         table.clear()
         for r in ranked_results:
+            vis = format_visual_alignment(target, r["sequence"], r["pam"], r.get("mismatch_positions"))
             table.add_row(
                 f"#{r['rank']}",
                 f"{r['position']:,}",
-                r['sequence'],
+                vis["match_display"],
                 r['pam'],
                 r['pam_type'].upper(),
                 f"{r['severity_score']:.1f}%",
@@ -193,12 +199,13 @@ class GeneWeaverTUI(App):
         ranked = rank_off_targets(raw_matches, genome, target)
         gpu_duration = time.perf_counter() - t0
 
-        self.call_from_thread(self.populate_table, ranked)
+        self.call_from_thread(self.populate_table, ranked, target)
         self.call_from_thread(self.update_progress, 100, f"Completed in {gpu_duration*1000:.2f} ms")
         log.write(f"[bold green]✓ Single-GPU Completed![/bold green] Scored [bold]{len(ranked)}[/bold] off-target site(s) in {gpu_duration*1000:.2f} ms.")
 
         for r in ranked[:5]:
-            log.write(f"  • Pos {r['position']:,} | Seq {r['sequence']} | PAM {r['pam']} | Score: {r['severity_score']}% | {r['risk_badge']}")
+            log.write(f"\n[bold cyan]─── Off-Target Match #{r['rank']} @ Position {r['position']:,} ───[/bold cyan]")
+            log.write(generate_alignment_track(target, r["sequence"], pam=r["pam"], use_rich=True))
 
     @work(thread=True)
     def action_run_dask(self) -> None:
@@ -229,12 +236,13 @@ class GeneWeaverTUI(App):
         ranked = rank_off_targets(unique_matches, genome, target)
         dist_duration = time.perf_counter() - t0
 
-        self.call_from_thread(self.populate_table, ranked)
+        self.call_from_thread(self.populate_table, ranked, target)
         self.call_from_thread(self.update_progress, 100, f"Dask Complete in {dist_duration*1000:.2f} ms")
         log.write(f"[bold green]✓ Dask Distributed Complete![/bold green] Gathered [bold]{len(ranked)}[/bold] deduplicated hits in {dist_duration*1000:.2f} ms.")
 
         for r in ranked[:5]:
-            log.write(f"  • Pos {r['position']:,} | Seq {r['sequence']} | PAM {r['pam']} | Score: {r['severity_score']}% | {r['risk_badge']}")
+            log.write(f"\n[bold cyan]─── Off-Target Match #{r['rank']} @ Position {r['position']:,} ───[/bold cyan]")
+            log.write(generate_alignment_track(target, r["sequence"], pam=r["pam"], use_rich=True))
 
     @work(thread=True)
     def action_run_benchmark(self) -> None:
@@ -263,6 +271,6 @@ class GeneWeaverTUI(App):
 if __name__ == "__main__":
     app = GeneWeaverTUI()
     if "--smoke-test" in sys.argv:
-        print("Created interactive TUI DataTable view successfully.")
+        print("Embedded visual mismatch display in TUI successfully.")
     else:
         app.run()

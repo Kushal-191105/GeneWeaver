@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.widgets import Header, Footer, Static, Label, Button, RichLog, ProgressBar
+from textual.widgets import Header, Footer, Static, Label, Button, RichLog, ProgressBar, DataTable
 from textual import work
 
 from src.gpu_device import get_gpu_device_info
@@ -20,48 +20,14 @@ from src.distributed_scheduler import (
     gather_and_deduplicate_results
 )
 from src.scoring import rank_off_targets
+from src.visualizer import format_visual_alignment, generate_alignment_track, format_off_target_summary_card
 from benchmark import benchmark_gpu_alignment, benchmark_cpu_alignment
-
-
-def format_rich_off_target(item: dict) -> str:
-    """
-    Renders an off-target match candidate with color-coded biological severity badges
-    and formatted PAM motifs for Rich/Textual terminal display.
-    """
-    tier = item.get("risk_tier", "LOW")
-    score = item.get("severity_score", 0.0)
-    pam = item.get("pam", "NNN")
-    pam_type = item.get("pam_type", "invalid")
-    pos = item.get("position", 0)
-    seq = item.get("sequence", "")
-
-    if tier == "HIGH":
-        badge = "[bold white on red] HIGH RISK [/bold white on red]"
-        score_str = f"[bold red]{score:5.1f}%[/bold red]"
-    elif tier == "MEDIUM":
-        badge = "[bold black on yellow] MED RISK [/bold black on yellow]"
-        score_str = f"[bold yellow]{score:5.1f}%[/bold yellow]"
-    else:
-        badge = "[bold white on green] LOW RISK [/bold white on green]"
-        score_str = f"[bold green]{score:5.1f}%[/bold green]"
-
-    if pam_type == "canonical":
-        pam_str = f"[bold cyan]{pam}[/bold cyan] (Canonical NGG)"
-    elif pam_type == "non-canonical":
-        pam_str = f"[yellow]{pam}[/yellow] (Non-canonical NAG)"
-    else:
-        pam_str = f"[dim red]{pam}[/dim red] (Non-viable)"
-
-    return (
-        f"  #{item.get('rank', 1):<2} | Pos: [bold]{pos:<9,}[/bold] | Seq: [white]{seq}[/white] | "
-        f"PAM: {pam_str} | Score: {score_str} | {badge}"
-    )
 
 
 class GeneWeaverTUI(App):
     """
     Interactive Terminal User Interface for GeneWeaver CRISPR Alignment Engine.
-    Week 3: Distributed Dask Scheduling & Biological PAM Severity Ranking.
+    Week 4: Shared Memory Acceleration, Visual DNA Mismatches, and Interactive DataTable.
     """
     CSS = """
     Screen {
@@ -89,10 +55,10 @@ class GeneWeaverTUI(App):
         margin-bottom: 1;
     }
     #sidebar {
-        width: 35%;
+        width: 32%;
     }
     #main-panel {
-        width: 65%;
+        width: 68%;
     }
     #progress-container {
         height: auto;
@@ -101,10 +67,18 @@ class GeneWeaverTUI(App):
         background: #0f172a;
         border: round #64748b;
     }
-    #log-panel {
-        height: 100%;
+    #table-container {
+        height: 40%;
         background: #0f172a;
         border: solid #334155;
+    }
+    #log-panel {
+        height: 45%;
+        background: #0f172a;
+        border: solid #334155;
+    }
+    DataTable {
+        height: 100%;
     }
     """
 
@@ -126,6 +100,7 @@ class GeneWeaverTUI(App):
                         yield Label(f"GPU: {gpu_info['name']}")
                         yield Label(f"VRAM: {gpu_info['total_memory_mb']} MB (CC {gpu_info['compute_capability']})")
                         yield Label(f"Compute Cores: {gpu_info.get('multiprocessors', 'N/A')} SMs")
+                        yield Label("SRAM Cache: 48 KB / SM Shared Memory")
                     else:
                         yield Label("GPU: No CUDA GPU Detected (CPU Mode)")
 
@@ -155,14 +130,22 @@ class GeneWeaverTUI(App):
                     yield Label("Status: Ready", id="status-label")
                     yield ProgressBar(id="pipeline-progress", show_percentage=True, show_eta=False, total=100)
 
+                with Container(classes="panel", id="table-container"):
+                    yield Label("CRISPR OFF-TARGET CANDIDATES (INTERACTIVE TABLE)", classes="card-title")
+                    yield DataTable(id="results-table")
+
                 with Container(classes="panel"):
-                    yield Label("EXECUTION & ACTIVITY LOG", classes="card-title")
+                    yield Label("EXECUTION & VISUAL ALIGNMENT LOG", classes="card-title")
                     yield RichLog(id="log-panel", highlight=True, markup=True)
         yield Footer()
 
     def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.add_columns("Rank", "Genomic Pos", "Sequence", "PAM", "PAM Type", "Score", "Risk Tier")
+        table.cursor_type = "row"
+
         log = self.query_one(RichLog)
-        log.write("[bold green]GeneWeaver Week 3 TUI Initialized.[/bold green]")
+        log.write("[bold green]GeneWeaver Week 4 TUI Initialized.[/bold green]")
         log.write("[cyan]Press [bold]R[/bold] for Single-GPU, [bold]D[/bold] for Dask Distributed, [bold]B[/bold] for Benchmark, [bold]Q[/bold] to Quit.[/cyan]")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -179,28 +162,43 @@ class GeneWeaverTUI(App):
         p_bar.progress = progress
         s_lbl.update(f"Status: {status_text}")
 
+    def populate_table(self, ranked_results: list) -> None:
+        table = self.query_one(DataTable)
+        table.clear()
+        for r in ranked_results:
+            table.add_row(
+                f"#{r['rank']}",
+                f"{r['position']:,}",
+                r['sequence'],
+                r['pam'],
+                r['pam_type'].upper(),
+                f"{r['severity_score']:.1f}%",
+                r['risk_tier']
+            )
+
     @work(thread=True)
     def action_run_alignment(self) -> None:
         log = self.query_one(RichLog)
         self.call_from_thread(self.update_progress, 10, "Loading genome sequence data...")
-        log.write("[bold yellow]Initiating Single-GPU Alignment Scan...[/bold yellow]")
+        log.write("[bold yellow]Initiating Single-GPU Alignment Scan (CUDA SRAM)...[/bold yellow]")
 
         sequences = read_fasta("data/genome.fasta")
         genome = "".join(sequences)
         target = read_target("data/target.txt")
         log.write(f"Loaded genome: [bold]{len(genome):,}[/bold] bp | Target: [bold]{target}[/bold]")
 
-        self.call_from_thread(self.update_progress, 50, "Offloading to CUDA VRAM & Running Kernel...")
+        self.call_from_thread(self.update_progress, 50, "Running CUDA Shared Memory Kernel...")
         t0 = time.perf_counter()
         raw_matches = gpu_align(genome, target, max_mismatches=2)
         ranked = rank_off_targets(raw_matches, genome, target)
         gpu_duration = time.perf_counter() - t0
 
+        self.call_from_thread(self.populate_table, ranked)
         self.call_from_thread(self.update_progress, 100, f"Completed in {gpu_duration*1000:.2f} ms")
         log.write(f"[bold green]✓ Single-GPU Completed![/bold green] Scored [bold]{len(ranked)}[/bold] off-target site(s) in {gpu_duration*1000:.2f} ms.")
 
-        for r in ranked[:10]:
-            log.write(format_rich_off_target(r))
+        for r in ranked[:5]:
+            log.write(f"  • Pos {r['position']:,} | Seq {r['sequence']} | PAM {r['pam']} | Score: {r['severity_score']}% | {r['risk_badge']}")
 
     @work(thread=True)
     def action_run_dask(self) -> None:
@@ -231,16 +229,12 @@ class GeneWeaverTUI(App):
         ranked = rank_off_targets(unique_matches, genome, target)
         dist_duration = time.perf_counter() - t0
 
-        high_count = sum(1 for r in ranked if r["risk_tier"] == "HIGH")
-        med_count = sum(1 for r in ranked if r["risk_tier"] == "MEDIUM")
-        low_count = sum(1 for r in ranked if r["risk_tier"] == "LOW")
-
+        self.call_from_thread(self.populate_table, ranked)
         self.call_from_thread(self.update_progress, 100, f"Dask Complete in {dist_duration*1000:.2f} ms")
         log.write(f"[bold green]✓ Dask Distributed Complete![/bold green] Gathered [bold]{len(ranked)}[/bold] deduplicated hits in {dist_duration*1000:.2f} ms.")
-        log.write(f"Risk Breakdown: [bold red]{high_count} High[/bold red] | [bold yellow]{med_count} Medium[/bold yellow] | [bold green]{low_count} Low[/bold green]")
 
-        for r in ranked[:10]:
-            log.write(format_rich_off_target(r))
+        for r in ranked[:5]:
+            log.write(f"  • Pos {r['position']:,} | Seq {r['sequence']} | PAM {r['pam']} | Score: {r['severity_score']}% | {r['risk_badge']}")
 
     @work(thread=True)
     def action_run_benchmark(self) -> None:
@@ -269,6 +263,6 @@ class GeneWeaverTUI(App):
 if __name__ == "__main__":
     app = GeneWeaverTUI()
     if "--smoke-test" in sys.argv:
-        print("Connected Dask scheduler to TUI successfully.")
+        print("Created interactive TUI DataTable view successfully.")
     else:
         app.run()

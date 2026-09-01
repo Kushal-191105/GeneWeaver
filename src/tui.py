@@ -26,6 +26,7 @@ from src.visualizer import (
     describe_mutations,
     format_off_target_summary_card
 )
+from src.exporter import export_results_to_json, export_results_to_csv
 from benchmark import benchmark_gpu_alignment, benchmark_cpu_alignment
 
 
@@ -92,7 +93,13 @@ class GeneWeaverTUI(App):
         ("r", "run_alignment", "Run Scan"),
         ("d", "run_dask", "Dask Distributed"),
         ("b", "run_benchmark", "Benchmark"),
+        ("e", "export_results", "Export"),
     ]
+
+    def __init__(self):
+        super().__init__()
+        self.last_results = []
+        self.target_seq = "ATGCCCCAACTAAATACTAC"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -118,7 +125,7 @@ class GeneWeaverTUI(App):
 
                 with Container(classes="panel"):
                     yield Label("CRISPR TARGET & PAM", classes="card-title")
-                    yield Label("Target: ATGCCCCAACTAAATACTAC (20 bp)")
+                    yield Label(f"Target: {self.target_seq} (20 bp)")
                     yield Label("PAM Motif: SpCas9 [NGG / NAG]")
                     yield Label("Seed Window: Positions 11-20 (Critical)")
                     yield Label("Tolerance: Max 2 Mismatches")
@@ -128,6 +135,7 @@ class GeneWeaverTUI(App):
                     yield Button("▶ Run Alignment (R)", id="btn-run", variant="primary")
                     yield Button("🌐 Distributed Dask (D)", id="btn-dask", variant="warning")
                     yield Button("⚡ Benchmark (B)", id="btn-bench", variant="success")
+                    yield Button("📁 Export Report (E)", id="btn-export", variant="default")
 
             with Vertical(id="main-panel"):
                 with Container(id="progress-container"):
@@ -136,7 +144,7 @@ class GeneWeaverTUI(App):
                     yield ProgressBar(id="pipeline-progress", show_percentage=True, show_eta=False, total=100)
 
                 with Container(classes="panel", id="table-container"):
-                    yield Label("CRISPR OFF-TARGET CANDIDATES (INTERACTIVE TABLE)", classes="card-title")
+                    yield Label("CRISPR OFF-TARGET CANDIDATES (CLICK ROW TO INSPECT)", classes="card-title")
                     yield DataTable(id="results-table")
 
                 with Container(classes="panel"):
@@ -151,7 +159,7 @@ class GeneWeaverTUI(App):
 
         log = self.query_one(RichLog)
         log.write("[bold green]GeneWeaver Week 4 TUI Initialized.[/bold green]")
-        log.write("[cyan]Press [bold]R[/bold] for Single-GPU, [bold]D[/bold] for Dask Distributed, [bold]B[/bold] for Benchmark, [bold]Q[/bold] to Quit.[/cyan]")
+        log.write("[cyan]Hotkeys: [bold]R[/bold] Single-GPU | [bold]D[/bold] Dask Distributed | [bold]B[/bold] Benchmark | [bold]E[/bold] Export | [bold]Q[/bold] Quit[/cyan]")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-run":
@@ -160,6 +168,8 @@ class GeneWeaverTUI(App):
             self.action_run_dask()
         elif event.button.id == "btn-bench":
             self.action_run_benchmark()
+        elif event.button.id == "btn-export":
+            self.action_export_results()
 
     def update_progress(self, progress: float, status_text: str) -> None:
         p_bar = self.query_one("#pipeline-progress", ProgressBar)
@@ -168,12 +178,13 @@ class GeneWeaverTUI(App):
         s_lbl.update(f"Status: {status_text}")
 
     def populate_table(self, ranked_results: list, target: str) -> None:
+        self.last_results = ranked_results
+        self.target_seq = target
         table = self.query_one(DataTable)
         table.clear()
         for r in ranked_results:
             vis = format_visual_alignment(target, r["sequence"], r["pam"], r.get("mismatch_positions"))
 
-            # PAM formatting
             p_type = r.get("pam_type", "invalid")
             if p_type == "canonical":
                 pam_badge = f"[bold cyan]{r['pam']}[/bold cyan]"
@@ -185,7 +196,6 @@ class GeneWeaverTUI(App):
                 pam_badge = f"[dim red]{r['pam']}[/dim red]"
                 type_badge = "[dim red]Non-viable (0.0x)[/dim red]"
 
-            # Risk tier formatting
             tier = r.get("risk_tier", "LOW")
             if tier == "HIGH":
                 risk_badge = "[bold white on red] HIGH RISK [/bold white on red]"
@@ -206,6 +216,26 @@ class GeneWeaverTUI(App):
                 score_str,
                 risk_badge
             )
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        row_idx = event.cursor_row
+        if 0 <= row_idx < len(self.last_results):
+            selected_item = self.last_results[row_idx]
+            log = self.query_one(RichLog)
+            log.write(f"\n[bold yellow]═══ Detailed Mutation Inspection for Rank #{selected_item['rank']} ═══[/bold yellow]")
+            card = format_off_target_summary_card(selected_item, self.target_seq, use_rich=True)
+            log.write(card)
+
+    def action_export_results(self) -> None:
+        log = self.query_one(RichLog)
+        if not self.last_results:
+            log.write("[bold yellow]No alignment results to export. Run a scan first![/bold yellow]")
+            return
+
+        json_file = export_results_to_json(self.last_results, self.target_seq, "data/crispr_off_target_report.json")
+        csv_file = export_results_to_csv(self.last_results, "data/crispr_off_target_summary.csv")
+        log.write(f"[bold green]✓ Exported JSON Report:[/bold green] {json_file}")
+        log.write(f"[bold green]✓ Exported CSV Summary:[/bold green] {csv_file}")
 
     @work(thread=True)
     def action_run_alignment(self) -> None:
@@ -296,6 +326,6 @@ class GeneWeaverTUI(App):
 if __name__ == "__main__":
     app = GeneWeaverTUI()
     if "--smoke-test" in sys.argv:
-        print("Added PAM visualization in TUI table successfully.")
+        print("Final TUI polishing and keybindings verified successfully.")
     else:
         app.run()

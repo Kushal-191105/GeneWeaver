@@ -7,6 +7,7 @@ from src.gpu_alignment import (
     transfer_genome_to_gpu,
     transfer_target_to_gpu,
     cuda_mismatch_count_kernel,
+    cuda_shared_mem_alignment_kernel,
 )
 from src.distributed_scheduler import dispatch_parallel_alignment, gather_and_deduplicate_results
 from numba import cuda
@@ -14,13 +15,13 @@ from numba import cuda
 
 def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, threads_per_block: int = 256):
     """
-    Measures detailed GPU alignment execution times.
+    Measures detailed GPU alignment execution times (using Shared Memory kernel).
     """
     # 1. Warm-up JIT compilation on a tiny dummy sequence
     dummy_g, _ = transfer_genome_to_gpu("ATGC" * 10)
     dummy_t, _ = transfer_target_to_gpu("ATGC")
     dummy_out = cuda.device_array(37, dtype=np.uint8)
-    cuda_mismatch_count_kernel[1, 32](dummy_g, dummy_t, dummy_out, 37, 4, 2)
+    cuda_shared_mem_alignment_kernel[1, 32](dummy_g, dummy_t, dummy_out, 37, 4, 2, 40)
     cuda.synchronize()
 
     # 2. Measure Host-to-Device transfer
@@ -32,11 +33,11 @@ def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, t
     cuda.synchronize()
     t_h2d = time.perf_counter() - t0
 
-    # 3. Measure Kernel Execution
+    # 3. Measure Shared Memory Kernel Execution
     blocks_per_grid = math.ceil(total_positions / threads_per_block)
     t1 = time.perf_counter()
-    cuda_mismatch_count_kernel[blocks_per_grid, threads_per_block](
-        d_genome, d_target, d_mismatch_counts, total_positions, target_len, max_mismatches
+    cuda_shared_mem_alignment_kernel[blocks_per_grid, threads_per_block](
+        d_genome, d_target, d_mismatch_counts, total_positions, target_len, max_mismatches, genome_len
     )
     cuda.synchronize()
     t_kernel = time.perf_counter() - t1
@@ -62,6 +63,60 @@ def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, t
     }
 
 
+def benchmark_shared_vs_global_memory(genome: str, target: str, max_mismatches: int = 2, iterations: int = 5, threads_per_block: int = 256):
+    """
+    Directly audits CUDA Shared Memory (on-chip SRAM) vs Global Memory (VRAM) latency.
+    """
+    print(f"\n========== CUDA Shared Memory vs Global Memory Latency Audit ==========")
+    print(f"Genomic Sequence: {len(genome):,} bp | Target: {target} (len: {len(target)}) | Trials: {iterations}")
+
+    d_genome, genome_len = transfer_genome_to_gpu(genome)
+    d_target, target_len = transfer_target_to_gpu(target)
+    total_positions = genome_len - target_len + 1
+    d_out_global = cuda.device_array(total_positions, dtype=np.uint8)
+    d_out_shared = cuda.device_array(total_positions, dtype=np.uint8)
+    blocks_per_grid = math.ceil(total_positions / threads_per_block)
+
+    # Warmup both kernels
+    cuda_mismatch_count_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_global, total_positions, target_len, max_mismatches)
+    cuda_shared_mem_alignment_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_shared, total_positions, target_len, max_mismatches, genome_len)
+    cuda.synchronize()
+
+    global_times = []
+    shared_times = []
+
+    for i in range(1, iterations + 1):
+        # 1. Global Memory Kernel
+        t0 = time.perf_counter()
+        cuda_mismatch_count_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_global, total_positions, target_len, max_mismatches)
+        cuda.synchronize()
+        global_times.append((time.perf_counter() - t0) * 1000)
+
+        # 2. Shared Memory Kernel
+        t1 = time.perf_counter()
+        cuda_shared_mem_alignment_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_shared, total_positions, target_len, max_mismatches, genome_len)
+        cuda.synchronize()
+        shared_times.append((time.perf_counter() - t1) * 1000)
+
+    g_mean = float(np.mean(global_times))
+    s_mean = float(np.mean(shared_times))
+    sram_speedup = g_mean / s_mean if s_mean > 0 else 1.0
+
+    print("-" * 75)
+    print(f"{'Memory Architecture':<28} | {'Mean Time (ms)':<16} | {'Min Time (ms)':<16} | {'Throughput (Mbp/s)':<18}")
+    print("-" * 75)
+    print(f"{'Global VRAM (High Latency)':<28} | {g_mean:<16.3f} | {np.min(global_times):<16.3f} | {(len(genome)/1e6)/(g_mean/1000):<18.2f}")
+    print(f"{'Shared Memory (On-Chip SRAM)':<28} | {s_mean:<16.3f} | {np.min(shared_times):<16.3f} | {(len(genome)/1e6)/(s_mean/1000):<18.2f}")
+    print("-" * 75)
+    print(f"SRAM Latency Advantage : {sram_speedup:.2f}x faster execution from on-chip cache\n")
+
+    return {
+        "global_mean_ms": g_mean,
+        "shared_mean_ms": s_mean,
+        "sram_speedup": sram_speedup
+    }
+
+
 def benchmark_cpu_alignment(genome: str, target: str, max_mismatches: int = 2):
     """
     Measures standard single-threaded CPU alignment execution time.
@@ -78,7 +133,6 @@ def benchmark_cpu_alignment(genome: str, target: str, max_mismatches: int = 2):
 def benchmark_distributed_scaling(genome: str, target: str, max_mismatches: int = 2, batch_counts: list = None):
     """
     Benchmarks distributed Dask chunk scheduling across varying batch partition counts.
-    Evaluates multi-batch parallel throughput and overhead.
     """
     if batch_counts is None:
         batch_counts = [1, 2, 4, 8]
@@ -133,16 +187,16 @@ def compare_cpu_vs_gpu(sample_length: int = 200000):
     print("Running CPU alignment...")
     cpu_res = benchmark_cpu_alignment(genome, target, max_mismatches=2)
 
-    print("Running GPU alignment...")
+    print("Running GPU alignment (Shared Memory)...")
     gpu_res = benchmark_gpu_alignment(genome, target, max_mismatches=2)
 
     speedup_total = cpu_res["total_cpu_sec"] / gpu_res["total_gpu_sec"]
     speedup_kernel = cpu_res["total_cpu_sec"] / gpu_res["kernel_execution_sec"]
 
     print("\n" + "=" * 65)
-    print(f"{'Performance Metric':<30} | {'CPU Baseline':<15} | {'GPU Accelerated':<15}")
+    print(f"{'Performance Metric':<30} | {'CPU Baseline':<15} | {'GPU Accelerated (SRAM)':<22}")
     print("-" * 65)
-    print(f"{'Matches Found':<30} | {cpu_res['matches_count']:<15} | {gpu_res['matches_count']:<15}")
+    print(f"{'Matches Found':<30} | {cpu_res['matches_count']:<15} | {gpu_res['matches_count']:<22}")
     print(f"{'Execution Time (Total)':<30} | {cpu_res['total_cpu_sec']*1000:<12.2f} ms | {gpu_res['total_gpu_sec']*1000:<12.2f} ms")
     print(f"{'CUDA Kernel Only':<30} | {'N/A':<15} | {gpu_res['kernel_execution_sec']*1000:<12.3f} ms")
     print("-" * 65)
@@ -158,64 +212,11 @@ def compare_cpu_vs_gpu(sample_length: int = 200000):
     }
 
 
-def run_repeated_benchmark(iterations: int = 5, sample_length: int = 200000):
-    """
-    Executes multiple benchmark iterations to calculate statistical distribution.
-    """
-    print(f"\n========== Repeated Benchmark Suite ({iterations} Trials, {sample_length:,} bp) ==========")
-    sequences = read_fasta("data/genome.fasta")
-    genome = "".join(sequences)[:sample_length]
-    target = read_target("data/target.txt")
-
-    cpu_times = []
-    gpu_total_times = []
-    gpu_kernel_times = []
-
-    benchmark_gpu_alignment(genome[:1000], target, max_mismatches=2)
-
-    for i in range(1, iterations + 1):
-        print(f"Trial {i}/{iterations}...", end=" ", flush=True)
-        c_res = benchmark_cpu_alignment(genome, target, max_mismatches=2)
-        cpu_times.append(c_res["total_cpu_sec"] * 1000)
-
-        g_res = benchmark_gpu_alignment(genome, target, max_mismatches=2)
-        gpu_total_times.append(g_res["total_gpu_sec"] * 1000)
-        gpu_kernel_times.append(g_res["kernel_execution_sec"] * 1000)
-        print(f"CPU: {cpu_times[-1]:.1f}ms | GPU: {gpu_total_times[-1]:.2f}ms (Kernel: {gpu_kernel_times[-1]:.3f}ms)")
-
-    cpu_arr = np.array(cpu_times)
-    gpu_tot_arr = np.array(gpu_total_times)
-    gpu_kern_arr = np.array(gpu_kernel_times)
-
-    avg_speedup = np.mean(cpu_arr) / np.mean(gpu_tot_arr)
-    kernel_speedup = np.mean(cpu_arr) / np.mean(gpu_kern_arr)
-
-    print("\n" + "=" * 72)
-    print(f"{'Statistic':<18} | {'CPU Time (ms)':<16} | {'GPU Total (ms)':<16} | {'GPU Kernel (ms)':<16}")
-    print("-" * 72)
-    print(f"{'Mean':<18} | {np.mean(cpu_arr):<16.2f} | {np.mean(gpu_tot_arr):<16.3f} | {np.mean(gpu_kern_arr):<16.3f}")
-    print(f"{'Median':<18} | {np.median(cpu_arr):<16.2f} | {np.median(gpu_tot_arr):<16.3f} | {np.median(gpu_kern_arr):<16.3f}")
-    print(f"{'Min':<18} | {np.min(cpu_arr):<16.2f} | {np.min(gpu_tot_arr):<16.3f} | {np.min(gpu_kern_arr):<16.3f}")
-    print(f"{'Max':<18} | {np.max(cpu_arr):<16.2f} | {np.max(gpu_tot_arr):<16.3f} | {np.max(gpu_kern_arr):<16.3f}")
-    print(f"{'Std Dev':<18} | {np.std(cpu_arr):<16.2f} | {np.std(gpu_tot_arr):<16.3f} | {np.std(gpu_kern_arr):<16.3f}")
-    print("-" * 72)
-    print(f"Average Total Speedup  : {avg_speedup:.2f}x faster")
-    print(f"Average Kernel Speedup : {kernel_speedup:.2f}x faster")
-    print("=" * 72 + "\n")
-
-    return {
-        "cpu_mean_ms": float(np.mean(cpu_arr)),
-        "gpu_total_mean_ms": float(np.mean(gpu_tot_arr)),
-        "gpu_kernel_mean_ms": float(np.mean(gpu_kern_arr)),
-        "avg_speedup": float(avg_speedup),
-    }
-
-
 if __name__ == "__main__":
     seqs = read_fasta("data/genome.fasta")
     g = "".join(seqs)[:200000]
     t = read_target("data/target.txt")
 
-    # Run comparative and distributed scaling benchmarks
     compare_cpu_vs_gpu(sample_length=200000)
+    benchmark_shared_vs_global_memory(g, t, max_mismatches=2, iterations=5)
     benchmark_distributed_scaling(g, t, max_mismatches=2, batch_counts=[1, 2, 4])

@@ -4,6 +4,8 @@ import sys
 # Ensure project root in sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.scoring import is_seed_region
+
 
 def format_visual_alignment(target: str, match_seq: str, pam: str = "", mismatch_positions: list = None, use_rich: bool = True) -> dict:
     """
@@ -69,7 +71,7 @@ def generate_alignment_track(target: str, match_seq: str, pam: str = "", use_ric
                 track_chars.append("\033[1;32m|\033[0m")
         else:
             if use_rich:
-                track_chars.append("[bold red].[[/bold red]") if False else track_chars.append("[bold red].[/bold red]")
+                track_chars.append("[bold red].[/bold red]")
             else:
                 track_chars.append("\033[1;31m.\033[0m")
 
@@ -97,10 +99,83 @@ def generate_alignment_track(target: str, match_seq: str, pam: str = "", use_ric
     return block
 
 
+def describe_mutations(target: str, match_seq: str, use_rich: bool = True) -> list:
+    """
+    Identifies and formats detailed point mutation substitutions along the target sequence.
+    Differentiates critical seed region mutations from tolerated distal region mutations.
+    """
+    min_len = min(len(target), len(match_seq))
+    mutations = []
+
+    for i in range(min_len):
+        if target[i] != match_seq[i]:
+            ref_b = target[i]
+            mut_b = match_seq[i]
+            in_seed = is_seed_region(i)
+            region_name = "Seed Region" if in_seed else "Distal Region"
+
+            if use_rich:
+                desc = f"Pos {i+1:>2}: [cyan]{ref_b}[/cyan] -> [bold red]{mut_b}[/bold red] ({region_name})"
+            else:
+                desc = f"Pos {i+1:>2}: {ref_b} -> \033[1;31m{mut_b}\033[0m ({region_name})"
+
+            mutations.append({
+                "position_0": i,
+                "position_1": i + 1,
+                "ref_base": ref_b,
+                "mut_base": mut_b,
+                "is_seed": in_seed,
+                "region": region_name,
+                "description": desc
+            })
+
+    return mutations
+
+
+def format_off_target_summary_card(item: dict, target: str, use_rich: bool = True) -> str:
+    """
+    Generates a full visual analysis card for an off-target site.
+    """
+    pos = item.get("position", 0)
+    seq = item.get("sequence", "")
+    pam = item.get("pam", "")
+    score = item.get("severity_score", 0.0)
+    tier = item.get("risk_tier", "LOW")
+    pam_type = item.get("pam_type", "invalid")
+
+    track_str = generate_alignment_track(target, seq, pam=pam, use_rich=use_rich)
+    mutations = describe_mutations(target, seq, use_rich=use_rich)
+
+    mut_lines = "\n".join([f"  - {m['description']}" for m in mutations]) if mutations else "  - Exact match (0 mutations)"
+
+    card = (
+        f"Off-Target Site @ Position {pos:,} | Score: {score:.1f}% | Risk: [{tier}]\n"
+        f"PAM Motif: {pam} ({pam_type.upper()})\n"
+        f"{'-'*60}\n"
+        f"{track_str}\n"
+        f"Mutations:\n"
+        f"{mut_lines}\n"
+    )
+    return card
+
+
 if __name__ == "__main__":
     t = "ATGCCCCAACTAAATACTAC"
     m = "ATGCTCCAACTAAATCCTAC"
     p = "CGG"
 
-    print("Alignment Track Output:")
-    print(generate_alignment_track(t, m, pam=p, use_rich=False))
+    print("Mutation Descriptions:")
+    muts = describe_mutations(t, m, use_rich=False)
+    for mu in muts:
+        print(f"  {mu['description']}")
+
+    item = {
+        "position": 142050,
+        "sequence": m,
+        "pam": p,
+        "severity_score": 45.0,
+        "risk_tier": "MEDIUM",
+        "pam_type": "canonical"
+    }
+    print("\nOff-Target Summary Card:")
+    print(format_off_target_summary_card(item, t, use_rich=False))

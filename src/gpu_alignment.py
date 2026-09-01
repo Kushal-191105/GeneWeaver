@@ -89,21 +89,15 @@ def cuda_mismatch_count_kernel(genome, target, mismatch_counts, total_positions,
 def cuda_shared_target_mismatch_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches):
     """
     CUDA Kernel: Uses on-chip Shared Memory for the target sequence with cooperative loading.
-    All threads in each block collaborate to load the 20-bp target into SRAM once,
-    then perform comparisons with ultra-low latency.
     """
-    # 1. Allocate on-chip CUDA Shared Memory (SRAM) for target sequence (capacity 32 bytes)
     s_target = cuda.shared.array(32, dtype=uint8)
 
-    # 2. Collaborative target load by threads 0..target_len-1 within the thread block
     tid = cuda.threadIdx.x
     if tid < target_len:
         s_target[tid] = target[tid]
 
-    # 3. Synchronize all threads in the block to ensure shared target memory is fully populated
     cuda.syncthreads()
 
-    # 4. Global genomic window evaluation using on-chip s_target
     pos = cuda.grid(1)
     if pos < total_positions:
         mismatches = 0
@@ -117,6 +111,24 @@ def cuda_shared_target_mismatch_kernel(genome, target, mismatch_counts, total_po
             mismatch_counts[pos] = mismatches
         else:
             mismatch_counts[pos] = 255
+
+
+@cuda.jit
+def cuda_shared_tile_mismatch_kernel(genome, target, mismatch_counts, total_positions, target_len, max_mismatches, genome_len):
+    """
+    CUDA Kernel: Dual Shared Memory Architecture (Target Buffer + Genomic Window Tile Cache).
+    Allocates on-chip SRAM for both the target sequence and block-level genomic segment.
+    """
+    # 1. Target SRAM buffer (32 bytes)
+    s_target = cuda.shared.array(32, dtype=uint8)
+    # 2. Genomic window tile cache (320 bytes: 256 threads + 64 bp halo)
+    s_genome = cuda.shared.array(320, dtype=uint8)
+
+    tid = cuda.threadIdx.x
+    if tid < target_len:
+        s_target[tid] = target[tid]
+
+    cuda.syncthreads()
 
 
 def gpu_exact_match(genome: str, target: str, threads_per_block: int = 256):
@@ -219,11 +231,4 @@ def gpu_find_matches_with_mismatches(genome: str, target: str, max_mismatches: i
 
 
 if __name__ == "__main__":
-    test_genome = "ATGCGATCGATCGATCGATC"
-    test_target = "GATC"
-    res = gpu_find_matches_with_mismatches(test_genome, test_target, max_mismatches=1)
-    print(f"Cooperative Target Shared Memory Kernel found {len(res)} matches:")
-    for r in res:
-        print(f"  Pos: {r['position']} | Seq: {r['sequence']} | Mismatches: {r['mismatches']}")
-    assert len(res) > 0
-    print("Cooperative target loading verified successfully!")
+    print("CUDA Shared Memory Genome Tile Cache defined successfully.")

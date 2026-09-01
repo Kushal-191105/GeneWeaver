@@ -17,14 +17,12 @@ def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, t
     """
     Measures detailed GPU alignment execution times (using Shared Memory kernel).
     """
-    # 1. Warm-up JIT compilation on a tiny dummy sequence
     dummy_g, _ = transfer_genome_to_gpu("ATGC" * 10)
     dummy_t, _ = transfer_target_to_gpu("ATGC")
     dummy_out = cuda.device_array(37, dtype=np.uint8)
     cuda_shared_mem_alignment_kernel[1, 32](dummy_g, dummy_t, dummy_out, 37, 4, 2, 40)
     cuda.synchronize()
 
-    # 2. Measure Host-to-Device transfer
     t0 = time.perf_counter()
     d_genome, genome_len = transfer_genome_to_gpu(genome)
     d_target, target_len = transfer_target_to_gpu(target)
@@ -33,7 +31,6 @@ def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, t
     cuda.synchronize()
     t_h2d = time.perf_counter() - t0
 
-    # 3. Measure Shared Memory Kernel Execution
     blocks_per_grid = math.ceil(total_positions / threads_per_block)
     t1 = time.perf_counter()
     cuda_shared_mem_alignment_kernel[blocks_per_grid, threads_per_block](
@@ -42,7 +39,6 @@ def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, t
     cuda.synchronize()
     t_kernel = time.perf_counter() - t1
 
-    # 4. Measure Device-to-Host transfer & parsing
     t2 = time.perf_counter()
     h_mismatch_counts = d_mismatch_counts.copy_to_host()
     valid_positions = np.where(h_mismatch_counts <= max_mismatches)[0]
@@ -63,6 +59,63 @@ def benchmark_gpu_alignment(genome: str, target: str, max_mismatches: int = 2, t
     }
 
 
+def benchmark_block_dimensions(genome: str, target: str, block_sizes: list = None, max_mismatches: int = 2):
+    """
+    Evaluates GPU kernel performance across varying CUDA block dimensions (threads per block)
+    to identify optimal occupancy on NVIDIA Ampere (RTX 3050) architecture.
+    """
+    if block_sizes is None:
+        block_sizes = [64, 128, 256, 512]
+
+    print("\n========== CUDA Block Dimension & Occupancy Optimization ==========")
+    print(f"Genomic Sequence: {len(genome):,} bp | Target: {target} (len: {len(target)})")
+
+    d_genome, genome_len = transfer_genome_to_gpu(genome)
+    d_target, target_len = transfer_target_to_gpu(target)
+    total_positions = genome_len - target_len + 1
+    d_out = cuda.device_array(total_positions, dtype=np.uint8)
+
+    # Warmup
+    cuda_shared_mem_alignment_kernel[math.ceil(total_positions / 256), 256](
+        d_genome, d_target, d_out, total_positions, target_len, max_mismatches, genome_len
+    )
+    cuda.synchronize()
+
+    results = []
+    for b_dim in block_sizes:
+        grid_dim = math.ceil(total_positions / b_dim)
+        timings = []
+        for _ in range(5):
+            t0 = time.perf_counter()
+            cuda_shared_mem_alignment_kernel[grid_dim, b_dim](
+                d_genome, d_target, d_out, total_positions, target_len, max_mismatches, genome_len
+            )
+            cuda.synchronize()
+            timings.append((time.perf_counter() - t0) * 1000)
+
+        mean_t = float(np.mean(timings))
+        min_t = float(np.min(timings))
+        throughput = (len(genome) / 1e6) / (mean_t / 1000)
+        results.append({
+            "block_dim": b_dim,
+            "grid_dim": grid_dim,
+            "mean_ms": mean_t,
+            "min_ms": min_t,
+            "throughput_mbps": throughput
+        })
+
+    print("-" * 75)
+    print(f"{'Threads / Block':<16} | {'Grid Blocks':<14} | {'Mean Time (ms)':<16} | {'Throughput (Mbp/s)':<18}")
+    print("-" * 75)
+    for r in results:
+        print(f"{r['block_dim']:<16} | {r['grid_dim']:<14} | {r['mean_ms']:<16.3f} | {r['throughput_mbps']:<18.2f}")
+    print("-" * 75)
+
+    best = min(results, key=lambda x: x["mean_ms"])
+    print(f"Optimal Configuration: {best['block_dim']} threads/block ({best['throughput_mbps']:.2f} Mbp/s)\n")
+    return results
+
+
 def benchmark_shared_vs_global_memory(genome: str, target: str, max_mismatches: int = 2, iterations: int = 5, threads_per_block: int = 256):
     """
     Directly audits CUDA Shared Memory (on-chip SRAM) vs Global Memory (VRAM) latency.
@@ -77,7 +130,6 @@ def benchmark_shared_vs_global_memory(genome: str, target: str, max_mismatches: 
     d_out_shared = cuda.device_array(total_positions, dtype=np.uint8)
     blocks_per_grid = math.ceil(total_positions / threads_per_block)
 
-    # Warmup both kernels
     cuda_mismatch_count_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_global, total_positions, target_len, max_mismatches)
     cuda_shared_mem_alignment_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_shared, total_positions, target_len, max_mismatches, genome_len)
     cuda.synchronize()
@@ -86,13 +138,11 @@ def benchmark_shared_vs_global_memory(genome: str, target: str, max_mismatches: 
     shared_times = []
 
     for i in range(1, iterations + 1):
-        # 1. Global Memory Kernel
         t0 = time.perf_counter()
         cuda_mismatch_count_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_global, total_positions, target_len, max_mismatches)
         cuda.synchronize()
         global_times.append((time.perf_counter() - t0) * 1000)
 
-        # 2. Shared Memory Kernel
         t1 = time.perf_counter()
         cuda_shared_mem_alignment_kernel[blocks_per_grid, threads_per_block](d_genome, d_target, d_out_shared, total_positions, target_len, max_mismatches, genome_len)
         cuda.synchronize()
@@ -219,4 +269,5 @@ if __name__ == "__main__":
 
     compare_cpu_vs_gpu(sample_length=200000)
     benchmark_shared_vs_global_memory(g, t, max_mismatches=2, iterations=5)
+    benchmark_block_dimensions(g, t, block_sizes=[64, 128, 256, 512])
     benchmark_distributed_scaling(g, t, max_mismatches=2, batch_counts=[1, 2, 4])

@@ -1,3 +1,20 @@
+"""Genomic chunking.
+
+A chromosome-scale FASTA record does not fit comfortably in GPU VRAM, so
+the pipeline slices every record into fixed-size numpy arrays before the
+alignment kernels ever see it.
+
+Two rules make the chunking safe:
+
+* Chunks never span two records. Concatenating separate sequences would
+  invent matches that do not exist in the biology.
+* Consecutive chunks of the same record overlap by ``target_length - 1``
+  bases, so a match that straddles a chunk boundary is still fully
+  contained in one chunk. Each chunk then only *owns* the first
+  ``step`` positions of its window range, which keeps the overlap from
+  reporting the same match twice.
+"""
+
 import numpy as np
 
 DEFAULT_CHUNK_SIZE = 1_000_000
@@ -42,8 +59,13 @@ class Chunk:
 
 
 def encode_bases(sequence):
-    """Convert a DNA string to a uint8 array of ASCII codes."""
-    return np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+    """Convert a DNA string to a uint8 array of ASCII codes.
+
+    The array is copied so it is writeable: `numpy.frombuffer` returns a
+    read-only view of the string's buffer, and read-only arrays are an
+    avoidable edge case for CUDA host-to-device transfers.
+    """
+    return np.frombuffer(sequence.encode("ascii"), dtype=np.uint8).copy()
 
 
 def chunk_step(chunk_size=DEFAULT_CHUNK_SIZE, target_length=0):

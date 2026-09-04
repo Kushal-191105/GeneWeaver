@@ -1,11 +1,3 @@
-"""Input parsing for GeneWeaver.
-
-FASTA is the primary dataset format (`data/genome.fasta`); CSV/TSV tables
-such as `data/human_sequences.csv` are supported as an alternative input.
-Both are loaded into the same DataFrame shape, so the rest of the pipeline
-does not care which one was used.
-"""
-
 import gzip
 import os
 

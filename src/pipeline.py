@@ -9,7 +9,12 @@ from src.chunking import (
     iter_dataset_chunks,
 )
 from src.cpu_alignment import find_matches_with_mismatches
-from src.gpu_alignment import align_gpu, count_mismatches, gpu_backend_name
+from src.gpu_alignment import (
+    active_kernel,
+    align_gpu,
+    count_mismatches,
+    gpu_backend_name,
+)
 
 
 def count_alignment_positions(sequences, target_length):
@@ -156,8 +161,30 @@ def _cpu_chunk_hits(chunk, target, max_mismatches):
     return hits
 
 
+def sequence_index(dataset):
+    """sequence_id -> full record text, so hits can be given their PAM.
+
+    Scoring needs the bases sitting 3' of a match, which the match dict
+    itself does not carry. The loaded dataset already holds every record,
+    so the lookup is free.
+    """
+    records = dataset[["sequence_id", "sequence"]].itertuples(index=False)
+
+    return {sequence_id: sequence for sequence_id, sequence in records}
+
+
+def attach_scores(matches, dataset=None):
+    """Annotate hits with the Week 3 biological score and severity tier."""
+    from src.scoring import rank_matches, score_matches
+
+    sequences = sequence_index(dataset) if dataset is not None else {}
+
+    return rank_matches(score_matches(matches, sequences))
+
+
 def run_chunked_alignment(dataset, target, mode="gpu", max_mismatches=2,
-                          chunk_size=DEFAULT_CHUNK_SIZE, progress=None):
+                          chunk_size=DEFAULT_CHUNK_SIZE, progress=None,
+                          kernel="auto", stop_event=None):
     """Align `target` against a dataset one chunk at a time.
 
     Identical results to `run_alignment`, but the genome is streamed
@@ -198,11 +225,15 @@ def run_chunked_alignment(dataset, target, mode="gpu", max_mismatches=2,
         chunk_size=chunk_size,
         target_length=target_length,
     ):
+        if stop_event is not None and stop_event.is_set():
+            break
+
         if chunk.size >= target_length:
             if mode == "cpu":
                 hits = _cpu_chunk_hits(chunk, target, max_mismatches)
             else:
-                counts = count_mismatches(chunk.array, target_array, mode)
+                counts = count_mismatches(
+                    chunk.array, target_array, mode, kernel=kernel)
                 hits = _hits_from_counts(chunk, target, counts, max_mismatches)
 
             matches.extend(hits)
@@ -240,4 +271,6 @@ def run_chunked_alignment(dataset, target, mode="gpu", max_mismatches=2,
         "chunks": chunks_done,
         "chunk_size": chunk_size,
         "bases": bases_done,
+        "kernel": active_kernel(target_length, mode, kernel),
+        "stopped": bool(stop_event is not None and stop_event.is_set()),
     }
